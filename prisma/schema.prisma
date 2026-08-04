@@ -1,0 +1,1046 @@
+// Backend multi-tenant para os projetos de e-commerce da turma.
+// Regra de ouro: TODA entidade de negócio pertence a um Group (o "tenant").
+// A API key do grupo (no header X-API-Key) define o tenant e isola os dados.
+//
+// Unidade vendável = SEMPRE a variante (f1-catalog-variants, ADR-1):
+// produto SIMPLE tem 1 variante default; produto VARIABLE tem N variantes.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// TENANT + RASTREIO (o que VOCÊ, professor, gerencia)
+// ---------------------------------------------------------------------------
+
+/// Um grupo da turma. Recebe UMA API key. Todos os dados abaixo pertencem a ele.
+model Group {
+  id           String   @id @default(cuid())
+  name         String // ex.: "Grupo 01 - Loja de Games"
+  /// Só o hash da chave é guardado. A chave em texto é mostrada 1x na criação.
+  apiKeyHash   String   @unique
+  /// Prefixo visível da chave (ex.: "sk_live_ab12") para você identificar no painel.
+  apiKeyPrefix String
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  students    Student[]
+  categories  Category[]
+  brands      Brand[]
+  tags        Tag[]
+  collections Collection[]
+  products    Product[]
+  variants    ProductVariant[]
+  customers   Customer[]
+  carts       Cart[]
+  orders      Order[]
+  logs        RequestLog[]
+  warehouses    Warehouse[]
+  stockBalances StockBalance[]
+  stockMovements StockMovement[]
+  reservations  Reservation[]
+  outboxEvents  OutboxEvent[]
+  webhookEndpoints  WebhookEndpoint[]
+  webhookDeliveries WebhookDelivery[]
+  sandboxPayments      SandboxPayment[]
+  sandboxSubscriptions SandboxSubscription[]
+  shipments            Shipment[]
+  addresses        Address[]
+  favorites        Favorite[]
+  customerSegments CustomerSegment[]
+  fakeInvoices     FakeInvoice[]
+  emailOutbox      EmailOutbox[]
+  integrationLogs  IntegrationSyncLog[]
+  config           GroupConfig?
+  missionProgress  MissionProgress[]
+  groupBadges      GroupBadge[]
+  xpLedger         XpLedger[]
+  submissions      Submission[]
+  teachingSettings GroupTeachingSettings?
+  apiKeys          ApiKey[]
+
+  @@index([apiKeyPrefix])
+}
+
+/// Chaves de API nomeadas que o GRUPO cria (estilo Shopify) para autenticar
+/// seus apps/integrações no header X-API-Key. A chave em texto é mostrada 1x
+/// na criação; só o hash fica guardado. Revogar seta `revokedAt` (não apaga).
+/// Isto convive com a `Group.apiKeyHash` "primária" criada pelo professor.
+model ApiKey {
+  id         String    @id @default(cuid())
+  group      Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  name       String
+  /// SHA-256 da chave (busca por igualdade). A chave em texto nunca é guardada.
+  keyHash    String    @unique
+  /// Prefixo visível (ex.: "sk_live_ab12") para identificar a chave no painel.
+  keyPrefix  String
+  createdByRm String?
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([groupId])
+}
+
+/// Aluno, identificado pelo RM. Vinculado a um grupo.
+/// Faz login no admin web (login = RM). Senha inicial = RM, com troca forçada.
+model Student {
+  id                 String   @id @default(cuid())
+  rm                 String   @unique // Registro de Matrícula
+  name               String
+  group              Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId            String
+  /// Null = ainda no 1º acesso (senha inicial é o próprio RM).
+  passwordHash       String?
+  mustChangePassword Boolean  @default(true)
+  createdAt          DateTime @default(now())
+
+  @@index([groupId])
+}
+
+/// Log de TODA requisição à API. É aqui que você audita quem fez o quê.
+model RequestLog {
+  id         String   @id @default(cuid())
+  group      Group?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  groupId    String?
+  /// RM enviado no header X-Student-RM (quem, individualmente, fez a chamada).
+  rm         String?
+  method     String
+  path       String
+  statusCode Int
+  latencyMs  Int
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([groupId, createdAt])
+  @@index([rm])
+  @@index([path])
+}
+
+// ---------------------------------------------------------------------------
+// CATÁLOGO (por grupo)
+// ---------------------------------------------------------------------------
+
+model Category {
+  id        String    @id @default(cuid())
+  group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  name      String
+  slug      String
+  products  Product[]
+  createdAt DateTime  @default(now())
+
+  @@unique([groupId, slug])
+  @@index([groupId])
+}
+
+model Brand {
+  id        String    @id @default(cuid())
+  group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  name      String
+  slug      String
+  products  Product[]
+  createdAt DateTime  @default(now())
+
+  @@unique([groupId, slug])
+  @@index([groupId])
+}
+
+model Tag {
+  id        String    @id @default(cuid())
+  group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  name      String
+  products  Product[] @relation("ProductTags")
+  createdAt DateTime  @default(now())
+
+  @@unique([groupId, name])
+  @@index([groupId])
+}
+
+model Collection {
+  id        String    @id @default(cuid())
+  group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  name      String
+  slug      String
+  products  Product[] @relation("ProductCollections")
+  createdAt DateTime  @default(now())
+
+  @@unique([groupId, slug])
+  @@index([groupId])
+}
+
+model Product {
+  id              String       @id @default(cuid())
+  group           Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId         String
+  category        Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  categoryId      String?
+  brand           Brand?       @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  brandId         String?
+  type            ProductType  @default(SIMPLE)
+  state           ProductState @default(DRAFT)
+  /// Publicação agendada: se no futuro, o cliente final só vê a partir dessa data.
+  publishAt       DateTime?
+  name            String
+  description     String       @default("")
+  /// SEO
+  slug            String
+  metaTitle       String?
+  metaDescription String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  options       ProductOption[]
+  variants      ProductVariant[]
+  images        ProductImage[]
+  tags          Tag[]             @relation("ProductTags")
+  collections   Collection[]      @relation("ProductCollections")
+  relationsFrom ProductRelation[] @relation("RelationSource")
+  relationsTo   ProductRelation[] @relation("RelationTarget")
+
+  @@unique([groupId, slug])
+  @@index([groupId])
+  @@index([groupId, categoryId])
+  @@index([groupId, brandId])
+}
+
+/// Uma opção de variação (ex.: "Cor", "Tamanho") de um produto variável.
+model ProductOption {
+  id        String               @id @default(cuid())
+  product   Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  name      String
+  position  Int                  @default(0)
+  values    ProductOptionValue[]
+  links     VariantOptionValue[]
+
+  @@unique([productId, name])
+  @@index([productId])
+}
+
+/// Um valor possível de uma opção (ex.: "Preto", "P").
+model ProductOptionValue {
+  id       String               @id @default(cuid())
+  option   ProductOption        @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  optionId String
+  value    String
+  links    VariantOptionValue[]
+
+  @@unique([optionId, value])
+  @@index([optionId])
+}
+
+/// A unidade vendável. Produto SIMPLE tem 1 (isDefault); VARIABLE tem N.
+model ProductVariant {
+  id        String  @id @default(cuid())
+  group     Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  sku       String
+  barcode   String?
+  price     Decimal @db.Decimal(12, 2)
+  /// Saldo simples. A mecânica rica (movimentação/reserva/depósitos) vem em f1-inventory.
+  stock     Int     @default(0)
+  /// Estoque mínimo para alerta (usado por f1-inventory).
+  minStock  Int     @default(0)
+  weightGr  Int?
+  heightMm  Int?
+  widthMm   Int?
+  depthMm   Int?
+  isDefault Boolean @default(false)
+  active    Boolean @default(true)
+
+  optionValues VariantOptionValue[]
+  images       ProductImage[]
+  cartItems    CartItem[]
+  orderItems   OrderItem[]
+  balances     StockBalance[]
+  movements    StockMovement[]
+  reservations Reservation[]
+
+  @@unique([groupId, sku])
+  @@index([productId])
+  @@index([groupId])
+}
+
+/// Liga uma variante a UM valor de cada opção (a combinação que a define).
+model VariantOptionValue {
+  id            String             @id @default(cuid())
+  variant       ProductVariant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId     String
+  option        ProductOption      @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  optionId      String
+  optionValue   ProductOptionValue @relation(fields: [optionValueId], references: [id], onDelete: Cascade)
+  optionValueId String
+
+  // Uma variante tem no máximo um valor por opção.
+  @@unique([variantId, optionId])
+  @@index([variantId])
+}
+
+model ProductImage {
+  id        String          @id @default(cuid())
+  product   Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  variantId String?
+  url       String
+  position  Int             @default(0)
+  isPrimary Boolean         @default(false)
+
+  @@index([productId])
+}
+
+/// Produtos relacionados / cross-sell / upsell (ambos do mesmo grupo).
+model ProductRelation {
+  id        String       @id @default(cuid())
+  product   Product      @relation("RelationSource", fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  related   Product      @relation("RelationTarget", fields: [relatedId], references: [id], onDelete: Cascade)
+  relatedId String
+  kind      RelationKind
+
+  @@unique([productId, relatedId, kind])
+  @@index([productId])
+}
+
+// ---------------------------------------------------------------------------
+// CLIENTE FINAL (os compradores do app dos alunos) — auth via JWT
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id           String   @id @default(cuid())
+  group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId      String
+  name         String
+  email        String
+  passwordHash String
+  document     String? // CPF/CNPJ (só dígitos), validado no cadastro
+  createdAt    DateTime @default(now())
+
+  carts     Cart[]
+  orders    Order[]
+  addresses Address[]
+  favorites Favorite[]
+  segments  CustomerSegmentMember[]
+
+  // Email é único DENTRO do grupo (grupos diferentes podem ter o mesmo email).
+  @@unique([groupId, email])
+  @@index([groupId])
+}
+
+// ---------------------------------------------------------------------------
+// CARRINHO + PEDIDOS  (itens referenciam a VARIANTE)
+// ---------------------------------------------------------------------------
+
+model Cart {
+  id         String     @id @default(cuid())
+  group      Group      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  customer       Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId     String
+  status         CartStatus @default(ACTIVE)
+  items          CartItem[]
+  lastActivityAt DateTime   @default(now())
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@index([groupId])
+  @@index([customerId, status])
+  @@index([status, lastActivityAt])
+}
+
+model CartItem {
+  id        String         @id @default(cuid())
+  cart      Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  cartId    String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId String
+  quantity  Int
+  unitPrice Decimal        @db.Decimal(12, 2)
+
+  @@unique([cartId, variantId])
+  @@index([cartId])
+}
+
+model Order {
+  id         String      @id @default(cuid())
+  group      Group       @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  customer   Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId String
+  status          OrderStatus @default(PENDING)
+  total           Decimal     @db.Decimal(12, 2)
+  items            OrderItem[]
+  payment          Payment?
+  reservations     Reservation[]
+  sandboxPayments  SandboxPayment[]
+  shipments        Shipment[]
+  events           OrderEvent[]
+  internalComments OrderInternalComment[]
+  invoice          FakeInvoice?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@index([groupId, createdAt])
+  @@index([groupId, status, createdAt])
+  @@index([customerId])
+}
+
+model OrderItem {
+  id          String         @id @default(cuid())
+  order       Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId     String
+  variant     ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  variantId   String
+  // Snapshots no momento da compra (não mudam se o produto mudar depois).
+  productName String
+  variantSku  String
+  variantName String? // ex.: "Preto / P"
+  quantity    Int
+  unitPrice   Decimal        @db.Decimal(12, 2)
+
+  @@index([orderId])
+}
+
+model Payment {
+  id            String        @id @default(cuid())
+  order         Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId       String        @unique
+  method        PaymentMethod
+  status        PaymentStatus @default(PENDING)
+  amount        Decimal       @db.Decimal(12, 2)
+  transactionId String // id fake da transação
+  createdAt     DateTime      @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// ESTOQUE (f1-inventory) — StockBalance é a FONTE DA VERDADE.
+// variant.stock vira um cache derivado do "disponível" (onHand - reserved).
+// ---------------------------------------------------------------------------
+
+model Warehouse {
+  id        String   @id @default(cuid())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  name      String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  balances     StockBalance[]
+  movements    StockMovement[]
+  reservations Reservation[]
+
+  @@index([groupId])
+}
+
+/// Saldo por (variante, depósito). onHand = físico; reserved = reservado.
+/// disponível = onHand - reserved. `version` para optimistic concurrency.
+model StockBalance {
+  id          String         @id @default(cuid())
+  group       Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId     String
+  variant     ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId   String
+  warehouse   Warehouse      @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  warehouseId String
+  onHand      Int            @default(0)
+  reserved    Int            @default(0)
+  version     Int            @default(0)
+
+  @@unique([variantId, warehouseId])
+  @@index([groupId, variantId])
+}
+
+/// Movimento imutável (append-only). Histórico auditável.
+model StockMovement {
+  id          String       @id @default(cuid())
+  group       Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId     String
+  variant     ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId   String
+  warehouse   Warehouse    @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  warehouseId String
+  type        MovementType
+  quantity    Int
+  reason      String?
+  orderId     String?
+  rm          String?
+  createdAt   DateTime     @default(now())
+
+  @@index([groupId, variantId, createdAt])
+  @@index([variantId, type])
+}
+
+/// Reserva de estoque de um pedido. Liga pedido↔saldo; base da expiração.
+model Reservation {
+  id          String            @id @default(cuid())
+  group       Group             @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId     String
+  order       Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId     String
+  variant     ProductVariant    @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId   String
+  warehouse   Warehouse         @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  warehouseId String
+  quantity    Int
+  status      ReservationStatus @default(ACTIVE)
+  expiresAt   DateTime
+  createdAt   DateTime          @default(now())
+
+  @@index([status, expiresAt])
+  @@index([orderId])
+}
+
+/// Outbox (ADR-G5): eventos gravados na mesma transação do estado.
+/// A ENTREGA (relay/webhooks) vem no épico f1-webhooks; aqui só gravamos.
+model OutboxEvent {
+  id         String            @id @default(cuid())
+  group      Group             @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  type       String
+  payload    Json
+  status     OutboxStatus      @default(PENDING)
+  createdAt  DateTime          @default(now())
+  deliveries WebhookDelivery[]
+
+  @@index([status, createdAt])
+  @@index([groupId, type])
+}
+
+// ---------------------------------------------------------------------------
+// WEBHOOKS (f1-webhooks) — consomem o Outbox e entregam aos endpoints dos grupos.
+// ---------------------------------------------------------------------------
+
+model WebhookEndpoint {
+  id          String   @id @default(cuid())
+  group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId     String
+  url         String
+  description String?
+  /// Tipos de evento assinados. ['*'] = todos.
+  events      String[]
+  /// Secret do HMAC. PLAINTEXT de propósito: o backend E o consumidor precisam
+  /// do MESMO secret para calcular/verificar a assinatura. Nunca é logado;
+  /// mostrado só na criação e na rotação.
+  signingSecret String
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  deliveries WebhookDelivery[]
+
+  @@index([groupId])
+}
+
+model WebhookDelivery {
+  id                  String                @id @default(cuid())
+  group               Group                 @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId             String
+  endpoint            WebhookEndpoint       @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  endpointId          String
+  outboxEvent         OutboxEvent           @relation(fields: [outboxEventId], references: [id], onDelete: Cascade)
+  outboxEventId       String
+  eventType           String
+  status              WebhookDeliveryStatus @default(PENDING)
+  attempts            Int                   @default(0)
+  nextAttemptAt       DateTime              @default(now())
+  lastStatusCode      Int?
+  lastResponseSnippet String?
+  lastError           String?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  // Idempotência do fan-out: 1 entrega por (endpoint, evento).
+  @@unique([endpointId, outboxEventId])
+  @@index([status, nextAttemptAt])
+  @@index([groupId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// SANDBOX (f1-sandbox-integrations) — gateways FAKE de pagamento e frete.
+// Simulações didáticas: imitam o "shape" de um PSP/transportadora reais.
+// ---------------------------------------------------------------------------
+
+/// Cobrança no "gateway" fake. PIX/boleto ficam PENDING até o settle.
+model SandboxPayment {
+  id            String        @id @default(cuid())
+  group         Group         @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId       String
+  order         Order?        @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderId       String?
+  method        PaymentMethod
+  amount        Decimal       @db.Decimal(12, 2)
+  installments  Int?
+  status        PaymentStatus @default(PENDING)
+  providerRef   String
+  pixCopiaECola String?
+  boletoLine    String?
+  cardBrand     String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([groupId])
+  @@index([orderId])
+}
+
+/// Assinatura recorrente fake. `advance` gera uma nova cobrança por ciclo.
+model SandboxSubscription {
+  id           String   @id @default(cuid())
+  group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId      String
+  customerId   String?
+  amount       Decimal  @db.Decimal(12, 2)
+  intervalDays Int
+  status       String   @default("ACTIVE") // ACTIVE | CANCELLED
+  cyclesBilled Int      @default(0)
+  nextChargeAt DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([groupId])
+}
+
+/// Envio fake de um pedido, com rastreamento que evolui via `advance`.
+model Shipment {
+  id           String         @id @default(cuid())
+  group        Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId      String
+  order        Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId      String
+  service      String
+  cost         Decimal        @db.Decimal(12, 2)
+  etaDays      Int
+  status       ShipmentStatus @default(CREATED)
+  trackingCode String
+  events       TrackingEvent[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@index([groupId])
+  @@index([orderId])
+}
+
+model TrackingEvent {
+  id          String         @id @default(cuid())
+  shipment    Shipment       @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  shipmentId  String
+  status      ShipmentStatus
+  description String
+  createdAt   DateTime       @default(now())
+
+  @@index([shipmentId])
+}
+
+// ---------------------------------------------------------------------------
+// CLIENTES: endereços, segmentos, favoritos (f2-customers-orders)
+// ---------------------------------------------------------------------------
+
+model Address {
+  id            String      @id @default(cuid())
+  group         Group       @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId       String
+  customer      Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId    String
+  type          AddressType @default(SHIPPING)
+  isDefault     Boolean     @default(false)
+  recipientName String?
+  cep           String
+  street        String
+  number        String
+  complement    String?
+  district      String?
+  city          String
+  state         String
+  createdAt     DateTime    @default(now())
+
+  @@index([customerId])
+  @@index([groupId])
+}
+
+model CustomerSegment {
+  id        String                  @id @default(cuid())
+  group     Group                   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  name      String
+  members   CustomerSegmentMember[]
+  createdAt DateTime                @default(now())
+
+  @@unique([groupId, name])
+  @@index([groupId])
+}
+
+model CustomerSegmentMember {
+  id         String          @id @default(cuid())
+  segment    CustomerSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  segmentId  String
+  customer   Customer        @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId String
+
+  @@unique([segmentId, customerId])
+  @@index([customerId])
+}
+
+model Favorite {
+  id         String   @id @default(cuid())
+  group      Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId String
+  variantId  String
+  createdAt  DateTime @default(now())
+
+  @@unique([customerId, variantId])
+  @@index([groupId])
+}
+
+// ---------------------------------------------------------------------------
+// PEDIDOS: timeline + comentários internos (f2-customers-orders)
+// ---------------------------------------------------------------------------
+
+/// Linha do tempo do pedido (append-only): cada mudança de status.
+model OrderEvent {
+  id         String       @id @default(cuid())
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId    String
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  actor      OrderActor
+  rm         String?
+  note       String?
+  createdAt  DateTime     @default(now())
+
+  @@index([orderId])
+}
+
+/// Comentário interno do pedido — visível só ao grupo, NUNCA ao cliente.
+model OrderInternalComment {
+  id        String   @id @default(cuid())
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   String
+  rm        String?
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}
+
+// ---------------------------------------------------------------------------
+// COMUNICAÇÕES FAKE: NF-e, outbox de e-mail, mocks de integração
+// ---------------------------------------------------------------------------
+
+model FakeInvoice {
+  id        String   @id @default(cuid())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   String   @unique
+  number    Int // sequencial por grupo
+  xmlStub   String
+  createdAt DateTime @default(now())
+
+  @@index([groupId])
+}
+
+model EmailOutbox {
+  id        String   @id @default(cuid())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  to        String
+  template  String // ex.: order_confirmation, cart_recovery, newsletter
+  payload   Json
+  createdAt DateTime @default(now())
+
+  @@index([groupId, createdAt])
+}
+
+model IntegrationSyncLog {
+  id        String            @id @default(cuid())
+  group     Group             @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  system    IntegrationSystem
+  payload   Json
+  response  Json
+  createdAt DateTime          @default(now())
+
+  @@index([groupId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// CONTROL PLANE: RBAC de operadores, auditoria, idempotência, config
+// (f2-admin-rbac-security)
+// ---------------------------------------------------------------------------
+
+/// Usuário de operação (professor/monitor). Global — não pertence a um grupo.
+model OperatorUser {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  passwordHash String
+  role         OperatorRole @default(VIEWER)
+  active       Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+}
+
+/// Log de auditoria de ações sensíveis do control plane.
+model AuditLog {
+  id            String   @id @default(cuid())
+  operatorId    String?
+  operatorEmail String?
+  tokenMaster   Boolean  @default(false)
+  action        String
+  targetType    String?
+  targetId      String?
+  groupId       String?
+  meta          Json?
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([action])
+}
+
+/// Chave de idempotência por tenant (hash da API key) — evita duplicar POSTs.
+model IdempotencyKey {
+  id           String   @id @default(cuid())
+  tenantKey    String // hash da API key do grupo
+  key          String // valor do header Idempotency-Key
+  method       String
+  path         String
+  statusCode   Int
+  responseJson Json
+  createdAt    DateTime @default(now())
+
+  @@unique([tenantKey, key])
+  @@index([createdAt])
+}
+
+/// Configuração da loja por grupo (regional + identidade/contato/tema/fiscal).
+model GroupConfig {
+  id        String   @id @default(cuid())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String   @unique
+  locale    String   @default("pt-BR")
+  currency  String   @default("BRL")
+  timezone  String   @default("America/Sao_Paulo")
+  // Identidade
+  storeName        String?
+  storeDescription String?
+  logoUrl          String?
+  // Contato
+  supportEmail String?
+  whatsapp     String?
+  instagram    String?
+  // Tema (app mobile)
+  primaryColor String?
+  // Fiscal
+  address String?
+  cnpj    String?
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// CAMADA DE ENSINO (f3-teaching-layer) — bounded context que OBSERVA o resto.
+// Correção automática por evidência (RequestLog + estado do banco).
+// ---------------------------------------------------------------------------
+
+/// Missão declarativa: uma capacidade que o grupo deveria implementar.
+model Mission {
+  id          String            @id @default(cuid())
+  key         String            @unique
+  title       String
+  description String
+  phase       String
+  points      Int
+  weight      Int               @default(1)
+  badgeKey    String?
+  active      Boolean           @default(true)
+  /// Critério verificável: { type: 'request'|'flow'|'state', ... }
+  criteria    Json
+  progress    MissionProgress[]
+}
+
+/// Progresso de um grupo em uma missão (idempotente). Guarda a evidência.
+model MissionProgress {
+  id        String    @id @default(cuid())
+  group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  mission   Mission   @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  missionId String
+  met       Boolean   @default(false)
+  /// RM que disparou a ação que cumpriu a missão (do header X-Student-RM).
+  byRm      String?
+  evidence  Json?
+  metAt     DateTime?
+
+  @@unique([groupId, missionId])
+  @@index([groupId])
+}
+
+model Badge {
+  id          String       @id @default(cuid())
+  key         String       @unique
+  name        String
+  icon        String
+  description String
+  groupBadges GroupBadge[]
+}
+
+model GroupBadge {
+  id        String   @id @default(cuid())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  badge     Badge    @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  badgeId   String
+  awardedAt DateTime @default(now())
+
+  @@unique([groupId, badgeId])
+  @@index([groupId])
+}
+
+/// Livro-razão de XP: uma entrada por missão cumprida (por grupo e RM).
+model XpLedger {
+  id        String   @id @default(cuid())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  rm        String?
+  missionId String
+  points    Int
+  createdAt DateTime @default(now())
+
+  @@unique([groupId, missionId])
+  @@index([groupId])
+  @@index([rm])
+}
+
+/// "Enviar para correção": snapshot imutável do estado avaliado num instante.
+model Submission {
+  id            String   @id @default(cuid())
+  group         Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId       String
+  snapshot      Json
+  grade         Float
+  submittedByRm String?
+  createdAt     DateTime @default(now())
+
+  @@index([groupId])
+}
+
+model GroupTeachingSettings {
+  id            String  @id @default(cuid())
+  group         Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId       String  @unique
+  rankingOptOut Boolean @default(false)
+}
+
+// ---------------------------------------------------------------------------
+// ENUMS
+// ---------------------------------------------------------------------------
+
+enum OperatorRole {
+  ADMIN
+  MONITOR
+  VIEWER
+}
+
+enum ShipmentStatus {
+  CREATED
+  POSTED
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+}
+
+enum AddressType {
+  SHIPPING
+  BILLING
+}
+
+enum OrderActor {
+  CUSTOMER
+  STORE
+  SYSTEM
+}
+
+enum IntegrationSystem {
+  ERP
+  CRM
+  MARKETPLACE
+}
+
+enum MovementType {
+  RECEIVE
+  SALE
+  ADJUST
+  RESERVE
+  RELEASE
+}
+
+enum ReservationStatus {
+  ACTIVE
+  COMMITTED
+  RELEASED
+}
+
+enum OutboxStatus {
+  PENDING
+  DISPATCHED
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCESS
+  DEAD_LETTER
+}
+
+enum ProductType {
+  SIMPLE
+  VARIABLE
+}
+
+enum ProductState {
+  DRAFT
+  PUBLISHED
+  HIDDEN
+}
+
+enum RelationKind {
+  RELATED
+  CROSS_SELL
+  UPSELL
+}
+
+enum CartStatus {
+  ACTIVE
+  CHECKED_OUT
+  ABANDONED
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+  SHIPPED
+  DELIVERED
+  FULFILLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  DECLINED
+}
+
+enum PaymentMethod {
+  CREDIT_CARD
+  PIX
+  BOLETO
+}
