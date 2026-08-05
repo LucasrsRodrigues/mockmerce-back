@@ -231,14 +231,23 @@ export async function adminRoutes(app: FastifyInstance) {
     const group = await prisma.group.findUnique({ where: { id } });
     if (!group) throw notFound('Grupo não encontrado.');
 
-    const rms = students.map((s) => s.rm);
-    const clash = await prisma.student.findMany({ where: { rm: { in: rms } }, select: { rm: true } });
-    if (clash.length) throw conflict(`RM(s) já cadastrados: ${clash.map((c) => c.rm).join(', ')}.`);
+    const nameByRm = new Map<string, string>();
+    for (const s of students) { const rm = s.rm.trim(); if (rm) nameByRm.set(rm, s.name.trim()); }
+    const rms = [...nameByRm.keys()];
 
-    await prisma.student.createMany({
-      data: students.map((s) => ({ rm: s.rm, name: s.name, groupId: id })),
-    });
-    return { added: students.length };
+    const existing = await prisma.student.findMany({ where: { rm: { in: rms } }, select: { rm: true, groupId: true } });
+    const inOther = existing.filter((e) => e.groupId && e.groupId !== id).map((e) => e.rm);
+    if (inOther.length) throw conflict(`RM(s) já em outro grupo: ${inOther.join(', ')}.`);
+
+    const existingRms = new Set(existing.map((e) => e.rm));
+    // Alunos importados sem grupo → VINCULA a este grupo (preserva o nome do roster).
+    const toLink = existing.filter((e) => e.groupId === null).map((e) => e.rm);
+    // RMs ainda inexistentes → cria já no grupo.
+    const toCreate = rms.filter((rm) => !existingRms.has(rm)).map((rm) => ({ rm, name: nameByRm.get(rm)!, groupId: id }));
+
+    if (toLink.length) await prisma.student.updateMany({ where: { rm: { in: toLink } }, data: { groupId: id } });
+    if (toCreate.length) await prisma.student.createMany({ data: toCreate });
+    return { added: toLink.length + toCreate.length };
   });
 
   // ------------------------------------------------------------- LOGS DE ATIVIDADE
