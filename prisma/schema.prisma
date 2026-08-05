@@ -26,6 +26,8 @@ model Group {
   apiKeyHash   String   @unique
   /// Prefixo visível da chave (ex.: "sk_live_ab12") para você identificar no painel.
   apiKeyPrefix String
+  /// Último uso da chave PRIMÁRIA (as nomeadas têm o próprio lastUsedAt em ApiKey).
+  apiKeyLastUsedAt DateTime?
   active       Boolean  @default(true)
   createdAt    DateTime @default(now())
 

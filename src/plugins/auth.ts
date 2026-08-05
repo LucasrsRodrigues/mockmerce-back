@@ -48,6 +48,8 @@ export const authPlugin = fp(async (app) => {
       request.authVia = 'apiKey';
       const rm = request.headers['x-student-rm'];
       request.rm = typeof rm === 'string' && rm.trim() ? rm.trim() : null;
+      // Marca o último uso da chave primária (best-effort, não bloqueia a request).
+      void prisma.group.update({ where: { id: group.id }, data: { apiKeyLastUsedAt: new Date() } }).catch(() => {});
       return;
     }
 

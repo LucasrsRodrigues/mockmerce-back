@@ -37,7 +37,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   }, async (req) => {
     const groupId = req.group!.id;
     const [group, keys] = await Promise.all([
-      prisma.group.findUnique({ where: { id: groupId }, select: { apiKeyPrefix: true, createdAt: true } }),
+      prisma.group.findUnique({ where: { id: groupId }, select: { apiKeyPrefix: true, apiKeyLastUsedAt: true, createdAt: true } }),
       prisma.apiKey.findMany({
         where: { groupId },
         orderBy: { createdAt: 'desc' },
@@ -59,7 +59,8 @@ export async function settingsRoutes(app: FastifyInstance) {
     const primary = group?.apiKeyPrefix
       ? [{
           id: 'primary', name: 'Chave principal da loja', prefix: group.apiKeyPrefix,
-          revoked: false, createdByRm: null, lastUsedAt: null,
+          revoked: false, createdByRm: null,
+          lastUsedAt: group.apiKeyLastUsedAt?.toISOString() ?? null,
           createdAt: group.createdAt.toISOString(), isPrimary: true,
         }]
       : [];
