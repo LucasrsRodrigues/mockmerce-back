@@ -129,6 +129,37 @@ export async function adminRoutes(app: FastifyInstance) {
     return reply.code(201).send({ created: toCreate.length, skipped: [...existingSet] });
   });
 
+  // -------------------------------------------------- LISTAR TODOS OS ALUNOS
+  // Visão da turma inteira para o professor: quem está em qual loja e quem ainda
+  // não foi alocado (groupId null) nem acessou.
+  app.get('/admin/students', {
+    preHandler: app.requirePermission('groups:read'),
+    schema: {
+      tags: ['Admin'], summary: 'Lista todos os alunos da turma (com/sem grupo)', security: [{ adminToken: [] }],
+      response: {
+        200: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              rm: { type: 'string' }, name: { type: 'string' }, jaAcessou: { type: 'boolean' },
+              groupId: { type: ['string', 'null'] }, group: { type: ['string', 'null'] }, createdAt: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+  }, async () => {
+    const students = await prisma.student.findMany({
+      orderBy: { name: 'asc' },
+      select: { rm: true, name: true, passwordHash: true, createdAt: true, group: { select: { id: true, name: true } } },
+    });
+    return students.map((s) => ({
+      rm: s.rm, name: s.name, jaAcessou: s.passwordHash !== null,
+      groupId: s.group?.id ?? null, group: s.group?.name ?? null, createdAt: s.createdAt.toISOString(),
+    }));
+  });
+
   // ------------------------------------------------------------- LISTAR GRUPOS
   app.get('/admin/groups', {
     preHandler: app.requirePermission('groups:read'),
