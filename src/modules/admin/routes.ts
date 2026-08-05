@@ -78,6 +78,57 @@ export async function adminRoutes(app: FastifyInstance) {
     });
   });
 
+  // ------------------------------------------ IMPORTAR ALUNOS (roster, SEM grupo)
+  // O professor sobe a lista da turma só para todos terem LOGIN (senha inicial = RM).
+  // Depois cada aluno cria/entra numa loja pelo próprio painel. RMs já existentes
+  // são ignorados (idempotente).
+  app.post('/admin/students', {
+    preHandler: app.requirePermission('groups:write'),
+    schema: {
+      tags: ['Admin'],
+      summary: 'Importa alunos (RM + nome) SEM grupo — cria só o login',
+      security: [{ adminToken: [] }],
+      body: {
+        type: 'object',
+        required: ['students'],
+        properties: {
+          students: {
+            type: 'array', minItems: 1,
+            items: { type: 'object', required: ['rm', 'name'], properties: { rm: { type: 'string', minLength: 1 }, name: { type: 'string', minLength: 1 } } },
+          },
+        },
+      },
+      response: {
+        201: {
+          type: 'object',
+          properties: {
+            created: { type: 'integer' },
+            skipped: { type: 'array', items: { type: 'string' }, description: 'RMs já existentes (não recriados)' },
+          },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { students } = request.body as { students: { rm: string; name: string }[] };
+    // Normaliza e deduplica dentro do próprio payload (último nome vence).
+    const byRm = new Map<string, string>();
+    for (const s of students) {
+      const rm = s.rm.trim();
+      if (rm) byRm.set(rm, s.name.trim());
+    }
+    const rms = [...byRm.keys()];
+
+    const existing = await prisma.student.findMany({ where: { rm: { in: rms } }, select: { rm: true } });
+    const existingSet = new Set(existing.map((e) => e.rm));
+    const toCreate = rms.filter((rm) => !existingSet.has(rm)).map((rm) => ({ rm, name: byRm.get(rm)! }));
+
+    if (toCreate.length) {
+      await prisma.student.createMany({ data: toCreate }); // groupId = null (default)
+    }
+    await recordAudit(request.operator!, 'students.imported', { targetType: 'students', meta: { created: toCreate.length, skipped: existingSet.size } });
+    return reply.code(201).send({ created: toCreate.length, skipped: [...existingSet] });
+  });
+
   // ------------------------------------------------------------- LISTAR GRUPOS
   app.get('/admin/groups', {
     preHandler: app.requirePermission('groups:read'),

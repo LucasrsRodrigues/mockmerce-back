@@ -168,7 +168,7 @@ export async function classView() {
 
   return {
     porGrupo: porGrupo.sort((a, b) => b.xp - a.xp),
-    porAluno: byRm.map((r) => ({ rm: r.rm, nome: smap.get(r.rm!)?.name ?? '(RM não cadastrado)', grupo: smap.get(r.rm!)?.group.name ?? null, xp: r._sum.points ?? 0 })).sort((a, b) => b.xp - a.xp),
+    porAluno: byRm.map((r) => ({ rm: r.rm, nome: smap.get(r.rm!)?.name ?? '(RM não cadastrado)', grupo: smap.get(r.rm!)?.group?.name ?? null, xp: r._sum.points ?? 0 })).sort((a, b) => b.xp - a.xp),
   };
 }
 

@@ -143,10 +143,16 @@ export async function settingsRoutes(app: FastifyInstance) {
     const groupId = req.group!.id;
     const rm = (req.body as any).rm.trim();
     const name = (req.body as any).name.trim();
-    const clash = await prisma.student.findUnique({ where: { rm }, select: { groupId: true } });
-    if (clash) {
-      throw conflict(clash.groupId === groupId ? `RM ${rm} já está neste grupo.` : `RM ${rm} já pertence a outro grupo. Fale com o professor.`);
+    const existing = await prisma.student.findUnique({ where: { rm }, select: { id: true, groupId: true } });
+    if (existing) {
+      if (existing.groupId === groupId) throw conflict(`RM ${rm} já está neste grupo.`);
+      if (existing.groupId) throw conflict(`RM ${rm} já pertence a outro grupo. Fale com o professor.`);
+      // Aluno importado (sem grupo) → VINCULA a esta loja, preservando o nome do roster.
+      const linked = await prisma.student.update({ where: { id: existing.id }, data: { groupId }, select: { rm: true, name: true } });
+      await recordAudit(req.operator ?? { id: null, email: null, role: 'ADMIN', isMaster: false }, 'member.linked', { targetType: 'student', targetId: rm, groupId, meta: { byRm: req.rm } });
+      return reply.code(201).send(linked);
     }
+    // RM ainda não existe na turma → cria já dentro do grupo.
     const created = await prisma.student.create({ data: { rm, name, groupId }, select: { rm: true, name: true } });
     await recordAudit(req.operator ?? { id: null, email: null, role: 'ADMIN', isMaster: false }, 'member.added', { targetType: 'student', targetId: rm, groupId, meta: { name, byRm: req.rm } });
     return reply.code(201).send(created);
@@ -165,7 +171,8 @@ export async function settingsRoutes(app: FastifyInstance) {
     if (!student) throw notFound('Aluno não encontrado neste grupo.');
     const total = await prisma.student.count({ where: tenantScope(groupId) });
     if (total <= 1) throw badRequest('O grupo precisa ter ao menos um aluno.');
-    await prisma.student.delete({ where: { id: student.id } });
+    // Desvincula (mantém o login do aluno, que pode entrar/criar outra loja).
+    await prisma.student.update({ where: { id: student.id }, data: { groupId: null } });
     await recordAudit(req.operator ?? { id: null, email: null, role: 'ADMIN', isMaster: false }, 'member.removed', { targetType: 'student', targetId: rm, groupId, meta: { byRm: req.rm } });
     return { rm, removed: true };
   });

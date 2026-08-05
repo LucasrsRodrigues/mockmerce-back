@@ -50,7 +50,7 @@ export function verifyOperatorToken(token: string): OperatorTokenPayload {
 export interface StudentTokenPayload {
   sub: string; // studentId
   rm: string;
-  groupId: string;
+  groupId: string | null; // null = aluno ainda sem loja (só login)
   kind: 'student';
 }
 

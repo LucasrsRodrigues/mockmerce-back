@@ -94,8 +94,10 @@ model Student {
   id                 String   @id @default(cuid())
   rm                 String   @unique // Registro de Matrícula
   name               String
-  group              Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  groupId            String
+  /// Opcional: o aluno é importado SEM grupo (só login) e depois cria/entra numa
+  /// loja. onDelete: SetNull — apagar a loja não apaga o login do aluno.
+  group              Group?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  groupId            String?
   /// Null = ainda no 1º acesso (senha inicial é o próprio RM).
   passwordHash       String?
   mustChangePassword Boolean  @default(true)

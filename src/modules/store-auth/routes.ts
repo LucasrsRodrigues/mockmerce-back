@@ -1,11 +1,13 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { prisma } from '../../prisma.js';
 import { hashPassword, verifyPassword, signStudentToken, verifyStudentToken } from '../../lib/security.js';
-import { badRequest, forbidden, unauthorized } from '../../lib/errors.js';
+import { badRequest, conflict, forbidden, unauthorized } from '../../lib/errors.js';
+import { generateApiKey } from '../../lib/apiKey.js';
 
 const studentSchema = {
   type: 'object',
-  properties: { rm: { type: 'string' }, name: { type: 'string' }, groupId: { type: 'string' }, group: { type: 'string' }, mustChangePassword: { type: 'boolean' } },
+  // groupId/group podem ser null: aluno importado ainda sem loja.
+  properties: { rm: { type: 'string' }, name: { type: 'string' }, groupId: { type: ['string', 'null'] }, group: { type: ['string', 'null'] }, mustChangePassword: { type: 'boolean' } },
 };
 
 /** Senha válida? 1º acesso (sem hash) → senha == RM. Senão, compara o hash. */
@@ -36,11 +38,12 @@ export async function storeAuthRoutes(app: FastifyInstance) {
     const { rm, password } = req.body as { rm: string; password: string };
     const student = await prisma.student.findUnique({ where: { rm }, include: { group: { select: { name: true, active: true } } } });
     if (!student) throw unauthorized('RM ou senha inválidos.');
-    if (!student.group.active) throw forbidden('Grupo desativado. Fale com o professor.');
+    // Aluno pode não ter grupo ainda (só login). Só bloqueia se tiver grupo desativado.
+    if (student.group && !student.group.active) throw forbidden('Grupo desativado. Fale com o professor.');
     if (!(await checkPassword(student, password))) throw unauthorized('RM ou senha inválidos.');
 
     const token = signStudentToken({ sub: student.id, rm: student.rm, groupId: student.groupId });
-    return { token, student: { rm: student.rm, name: student.name, groupId: student.groupId, group: student.group.name, mustChangePassword: student.mustChangePassword }, mustChangePassword: student.mustChangePassword };
+    return { token, student: { rm: student.rm, name: student.name, groupId: student.groupId, group: student.group?.name ?? null, mustChangePassword: student.mustChangePassword }, mustChangePassword: student.mustChangePassword };
   });
 
   app.get('/store/auth/me', {
@@ -49,7 +52,7 @@ export async function storeAuthRoutes(app: FastifyInstance) {
     const payload = readToken(req);
     const student = await prisma.student.findUnique({ where: { id: payload.sub }, include: { group: { select: { name: true } } } });
     if (!student) throw unauthorized('Aluno não encontrado.');
-    return { rm: student.rm, name: student.name, groupId: student.groupId, group: student.group.name, mustChangePassword: student.mustChangePassword };
+    return { rm: student.rm, name: student.name, groupId: student.groupId, group: student.group?.name ?? null, mustChangePassword: student.mustChangePassword };
   });
 
   app.post('/store/auth/change-password', {
@@ -67,5 +70,32 @@ export async function storeAuthRoutes(app: FastifyInstance) {
 
     await prisma.student.update({ where: { id: student.id }, data: { passwordHash: await hashPassword(newPassword), mustChangePassword: false } });
     return { ok: true };
+  });
+
+  // Aluno logado (ainda SEM grupo) cria a PRÓPRIA loja e vira o 1º membro. Gera a
+  // API key (mostrada UMA vez) e devolve um TOKEN novo já com o groupId — o painel
+  // troca o token antigo por este e passa a ter acesso à loja.
+  app.post('/store/groups', {
+    schema: {
+      tags: ['Loja (aluno)'], summary: 'Cria a loja do aluno (grupo) e gera a API key', security: [{ studentToken: [] }],
+      body: { type: 'object', required: ['name'], properties: { name: { type: 'string', minLength: 1 } } },
+      response: { 201: { type: 'object', properties: { token: { type: 'string' }, groupId: { type: 'string' }, name: { type: 'string' }, apiKey: { type: 'string', description: 'GUARDE AGORA. Não será mostrada de novo.' } } } },
+    },
+  }, async (req, reply) => {
+    const payload = readToken(req);
+    const student = await prisma.student.findUnique({ where: { id: payload.sub }, select: { id: true, rm: true, groupId: true } });
+    if (!student) throw unauthorized('Aluno não encontrado.');
+    if (student.groupId) throw conflict('Você já pertence a uma loja.');
+
+    const name = (req.body as { name: string }).name.trim();
+    if (!name) throw badRequest('Informe um nome para a loja.');
+
+    const { key, hash, prefix } = generateApiKey();
+    const group = await prisma.group.create({ data: { name, apiKeyHash: hash, apiKeyPrefix: prefix } });
+    await prisma.student.update({ where: { id: student.id }, data: { groupId: group.id } });
+
+    // Token novo com o grupo (o antigo tinha groupId null).
+    const token = signStudentToken({ sub: student.id, rm: student.rm, groupId: group.id });
+    return reply.code(201).send({ token, groupId: group.id, name: group.name, apiKey: key });
   });
 }

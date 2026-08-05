@@ -3,7 +3,7 @@ import { prisma } from '../prisma.js';
 import { env } from '../env.js';
 import { hashApiKey } from '../lib/apiKey.js';
 import { verifyCustomerToken, verifyOperatorToken, verifyStudentToken } from '../lib/security.js';
-import { AppError, forbidden, unauthorized } from '../lib/errors.js';
+import { AppError, forbidden, noGroup, unauthorized } from '../lib/errors.js';
 import { hasPermission } from '../modules/admin/rbac.js';
 
 /**
@@ -60,6 +60,9 @@ export const authPlugin = fp(async (app) => {
       } catch {
         throw unauthorized('Sessão inválida ou expirada. Faça login de novo.');
       }
+      // Aluno logado mas ainda sem loja: as rotas de loja exigem grupo. Sinaliza
+      // NO_GROUP para o painel mandar o aluno criar/entrar numa loja.
+      if (!payload.groupId) throw noGroup();
       const group = await prisma.group.findUnique({ where: { id: payload.groupId }, select: { id: true, name: true, active: true } });
       if (!group) throw unauthorized('Grupo não encontrado.');
       if (!group.active) throw forbidden('Grupo desativado. Fale com o professor.');
