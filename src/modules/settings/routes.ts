@@ -35,18 +35,35 @@ export async function settingsRoutes(app: FastifyInstance) {
   app.get('/store/api-keys', {
     schema: { tags: ['Configurações'], summary: 'Lista as chaves de API do grupo (só o prefixo é visível)', security: sec },
   }, async (req) => {
-    const keys = await prisma.apiKey.findMany({
-      where: { groupId: req.group!.id },
-      orderBy: { createdAt: 'desc' },
-      select: { id: true, name: true, keyPrefix: true, lastUsedAt: true, revokedAt: true, createdAt: true, createdByRm: true },
-    });
-    return keys.map((k) => ({
+    const groupId = req.group!.id;
+    const [group, keys] = await Promise.all([
+      prisma.group.findUnique({ where: { id: groupId }, select: { apiKeyPrefix: true, createdAt: true } }),
+      prisma.apiKey.findMany({
+        where: { groupId },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, name: true, keyPrefix: true, lastUsedAt: true, revokedAt: true, createdAt: true, createdByRm: true },
+      }),
+    ]);
+    const named = keys.map((k) => ({
       id: k.id, name: k.name, prefix: k.keyPrefix,
       revoked: k.revokedAt !== null,
       createdByRm: k.createdByRm,
       lastUsedAt: k.lastUsedAt?.toISOString() ?? null,
       createdAt: k.createdAt.toISOString(),
+      isPrimary: false,
     }));
+    // A chave "principal" é gerada junto com a loja e mora no próprio Group
+    // (apiKeyHash/apiKeyPrefix), NÃO na tabela ApiKey — por isso não aparecia
+    // nesta lista. Incluímos como entrada sintética (id fixo "primary",
+    // não revogável) para o aluno enxergar a chave que recebeu na criação.
+    const primary = group?.apiKeyPrefix
+      ? [{
+          id: 'primary', name: 'Chave principal da loja', prefix: group.apiKeyPrefix,
+          revoked: false, createdByRm: null, lastUsedAt: null,
+          createdAt: group.createdAt.toISOString(), isPrimary: true,
+        }]
+      : [];
+    return [...primary, ...named];
   });
 
   app.post('/store/api-keys', {
@@ -77,6 +94,8 @@ export async function settingsRoutes(app: FastifyInstance) {
   }, async (req) => {
     const groupId = req.group!.id;
     const id = (req.params as any).id;
+    // "primary" é a chave da loja (entrada sintética em GET) — não vive na tabela ApiKey.
+    if (id === 'primary') throw badRequest('A chave principal da loja não pode ser revogada aqui. Crie chaves nomeadas para poder revogar quando quiser.');
     const key = await prisma.apiKey.findFirst({ where: tenantScope(groupId, { id }), select: { id: true, revokedAt: true } });
     if (!key) throw notFound('Chave não encontrada.');
     if (!key.revokedAt) {
