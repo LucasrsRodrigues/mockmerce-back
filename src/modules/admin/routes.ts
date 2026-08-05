@@ -3,6 +3,7 @@ import { prisma } from '../../prisma.js';
 import { generateApiKey } from '../../lib/apiKey.js';
 import { recordAudit } from './rbac.js';
 import { conflict, notFound } from '../../lib/errors.js';
+import { normalizeRm } from '../../lib/rm.js';
 
 export async function adminRoutes(app: FastifyInstance) {
   // Autentica o control plane (master token OU operador). A autorização é por rota.
@@ -113,7 +114,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // Normaliza e deduplica dentro do próprio payload (último nome vence).
     const byRm = new Map<string, string>();
     for (const s of students) {
-      const rm = s.rm.trim();
+      const rm = normalizeRm(s.rm);
       if (rm) byRm.set(rm, s.name.trim());
     }
     const rms = [...byRm.keys()];
@@ -263,7 +264,7 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!group) throw notFound('Grupo não encontrado.');
 
     const nameByRm = new Map<string, string>();
-    for (const s of students) { const rm = s.rm.trim(); if (rm) nameByRm.set(rm, s.name.trim()); }
+    for (const s of students) { const rm = normalizeRm(s.rm); if (rm) nameByRm.set(rm, s.name.trim()); }
     const rms = [...nameByRm.keys()];
 
     const existing = await prisma.student.findMany({ where: { rm: { in: rms } }, select: { rm: true, groupId: true } });

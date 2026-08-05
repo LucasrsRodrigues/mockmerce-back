@@ -5,6 +5,7 @@ import { tenantScope } from '../../lib/tenantScope.js';
 import { generateApiKey } from '../../lib/apiKey.js';
 import { recordAudit } from '../admin/rbac.js';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
+import { normalizeRm } from '../../lib/rm.js';
 
 const sec = [{ apiKey: [], studentRm: [] }];
 
@@ -161,7 +162,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     },
   }, async (req, reply) => {
     const groupId = req.group!.id;
-    const rm = (req.body as any).rm.trim();
+    const rm = normalizeRm((req.body as any).rm);
     const name = (req.body as any).name.trim();
     const existing = await prisma.student.findUnique({ where: { rm }, select: { id: true, groupId: true } });
     if (existing) {
@@ -185,7 +186,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     },
   }, async (req) => {
     const groupId = req.group!.id;
-    const rm = (req.params as any).rm;
+    const rm = normalizeRm((req.params as any).rm);
     if (rm === req.rm) throw badRequest('Você não pode remover a si mesmo do grupo.');
     const student = await prisma.student.findFirst({ where: tenantScope(groupId, { rm }), select: { id: true } });
     if (!student) throw notFound('Aluno não encontrado neste grupo.');

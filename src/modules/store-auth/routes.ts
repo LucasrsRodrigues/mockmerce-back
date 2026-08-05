@@ -3,6 +3,7 @@ import { prisma } from '../../prisma.js';
 import { hashPassword, verifyPassword, signStudentToken, verifyStudentToken } from '../../lib/security.js';
 import { badRequest, conflict, forbidden, unauthorized } from '../../lib/errors.js';
 import { generateApiKey } from '../../lib/apiKey.js';
+import { normalizeRm } from '../../lib/rm.js';
 
 const studentSchema = {
   type: 'object',
@@ -13,7 +14,8 @@ const studentSchema = {
 /** Senha válida? 1º acesso (sem hash) → senha == RM. Senão, compara o hash. */
 async function checkPassword(student: { rm: string; passwordHash: string | null }, password: string): Promise<boolean> {
   if (student.passwordHash) return verifyPassword(password, student.passwordHash);
-  return password === student.rm;
+  // 1º acesso: a senha é o próprio RM. Aceita também só os números / "rm" minúsculo.
+  return password === student.rm || normalizeRm(password) === student.rm;
 }
 
 function readToken(request: FastifyRequest) {
@@ -35,7 +37,8 @@ export async function storeAuthRoutes(app: FastifyInstance) {
       response: { 200: { type: 'object', properties: { token: { type: 'string' }, student: studentSchema, mustChangePassword: { type: 'boolean' } } } },
     },
   }, async (req) => {
-    const { rm, password } = req.body as { rm: string; password: string };
+    const { rm: rawRm, password } = req.body as { rm: string; password: string };
+    const rm = normalizeRm(rawRm);
     const student = await prisma.student.findUnique({ where: { rm }, include: { group: { select: { name: true, active: true } } } });
     if (!student) throw unauthorized('RM ou senha inválidos.');
     // Aluno pode não ter grupo ainda (só login). Só bloqueia se tiver grupo desativado.
