@@ -31,10 +31,14 @@ async function defaultWarehouse(groupId: string) {
  * passa a ser a fonte da verdade.
  */
 export async function ensureBalance(groupId: string, variantId: string) {
-  const existing = await prisma.stockBalance.findFirst({ where: { variantId } });
-  if (existing) return;
+  // Valida a posse da variante SEMPRE (antes do early-return): o StockBalance já é
+  // materializado para toda variante (backfill/checkout), então checar só quando o
+  // saldo não existe deixava um grupo escrever no estoque de variante de OUTRO grupo
+  // via receive/adjust (o syncVariantCache grava no ProductVariant.stock por id).
   const variant = await prisma.productVariant.findFirst({ where: tenantScope(groupId, { id: variantId }), select: { stock: true } });
   if (!variant) throw notFound('Variante não encontrada.');
+  const existing = await prisma.stockBalance.findFirst({ where: { variantId } });
+  if (existing) return;
   const dw = await defaultWarehouse(groupId);
   await prisma.stockBalance.upsert({
     where: { variantId_warehouseId: { variantId, warehouseId: dw.id } },
