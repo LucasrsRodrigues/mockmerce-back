@@ -25,6 +25,8 @@ import { settingsRoutes } from './modules/settings/routes.js';
 import { storeAuthRoutes } from './modules/store-auth/routes.js';
 import { teachingRoutes } from './modules/teaching/routes.js';
 import { adminRoutes } from './modules/admin/routes.js';
+import { adminInspectRoutes } from './modules/admin/inspect.js';
+import { adminDashboardRoutes } from './modules/admin/dashboard.js';
 import { operatorRoutes } from './modules/admin/operators.js';
 import { teachingAdminRoutes } from './modules/teaching/adminRoutes.js';
 
@@ -53,8 +55,23 @@ export async function buildApp() {
     },
   });
 
+  // CORS por rota:
+  //   - /admin/*  (control plane / painel do professor): restrito a ADMIN_CORS_ORIGIN.
+  //   - resto     (/v1/* — API que os alunos consomem via API key/SDK): aberto.
+  // Obs.: os painéis batem no backend pelo proxy /api do Nginx (same-origin), então
+  // NUNCA disparam CORS; isto só afeta chamadas cross-origin diretas do browser.
+  const openOrigin: true | string[] =
+    env.CORS_ORIGIN === '*' ? true : env.CORS_ORIGIN.split(',').map((s) => s.trim());
+  const adminOrigin: true | string[] = env.ADMIN_CORS_ORIGIN
+    ? env.ADMIN_CORS_ORIGIN.split(',').map((s) => s.trim())
+    : openOrigin; // sem ADMIN_CORS_ORIGIN, herda o geral (não trava em dev)
+
   await app.register(cors, {
-    origin: env.CORS_ORIGIN === '*' ? true : env.CORS_ORIGIN.split(',').map((s) => s.trim()),
+    delegator: (req: { url?: string }, cb: (err: Error | null, opts: { origin: true | string[] }) => void) => {
+      const path = (req.url || '/').split('?')[0];
+      const isAdmin = path === '/admin' || path.startsWith('/admin/');
+      cb(null, { origin: isAdmin ? adminOrigin : openOrigin });
+    },
   });
 
   // Tolera body vazio com Content-Type: application/json (cilada comum de quem
@@ -103,6 +120,8 @@ export async function buildApp() {
 
   // CONTROL PLANE — não versionado.
   await app.register(adminRoutes);
+  await app.register(adminInspectRoutes);
+  await app.register(adminDashboardRoutes);
   await app.register(operatorRoutes);
   await app.register(teachingAdminRoutes);
 

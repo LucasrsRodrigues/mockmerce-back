@@ -4,9 +4,13 @@ import { prisma } from './prisma.js';
 import { startReservationExpirer } from './modules/inventory/expirer.js';
 import { startWebhookRelay } from './modules/webhooks/relay.js';
 import { startAbandonmentJob } from './modules/cart/abandonment.js';
+import { ensureProfessorOperator } from './modules/admin/bootstrap.js';
 
 async function main() {
   const app = await buildApp();
+
+  // Garante a conta ADMIN do professor (a partir do .env) antes de aceitar tráfego.
+  await ensureProfessorOperator(app.log);
 
   // Job que libera reservas de estoque vencidas e cancela os pedidos.
   const stopExpirer = startReservationExpirer();
