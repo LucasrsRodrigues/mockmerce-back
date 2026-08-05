@@ -60,15 +60,23 @@ export const authPlugin = fp(async (app) => {
       } catch {
         throw unauthorized('Sessão inválida ou expirada. Faça login de novo.');
       }
+      // O groupId do token é só uma DICA: a associação do aluno pode ter mudado
+      // depois que o token foi emitido (ex.: um colega adicionou este RM à loja).
+      // Resolvemos o grupo ATUAL pelo id do aluno — mesma fonte de verdade que /me —
+      // senão o token fica "preso" sem loja e as rotas devolvem NO_GROUP mesmo o
+      // aluno já pertencendo a uma loja.
+      const student = await prisma.student.findUnique({
+        where: { id: payload.sub },
+        select: { rm: true, group: { select: { id: true, name: true, active: true } } },
+      });
+      if (!student) throw unauthorized('Aluno não encontrado.');
       // Aluno logado mas ainda sem loja: as rotas de loja exigem grupo. Sinaliza
       // NO_GROUP para o painel mandar o aluno criar/entrar numa loja.
-      if (!payload.groupId) throw noGroup();
-      const group = await prisma.group.findUnique({ where: { id: payload.groupId }, select: { id: true, name: true, active: true } });
-      if (!group) throw unauthorized('Grupo não encontrado.');
-      if (!group.active) throw forbidden('Grupo desativado. Fale com o professor.');
-      request.group = { id: group.id, name: group.name };
+      if (!student.group) throw noGroup();
+      if (!student.group.active) throw forbidden('Grupo desativado. Fale com o professor.');
+      request.group = { id: student.group.id, name: student.group.name };
       request.authVia = 'student';
-      request.rm = payload.rm;
+      request.rm = student.rm;
       return;
     }
 
