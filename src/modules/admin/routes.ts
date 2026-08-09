@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { prisma } from '../../prisma.js';
 import { generateApiKey } from '../../lib/apiKey.js';
 import { recordAudit } from './rbac.js';
-import { conflict, notFound } from '../../lib/errors.js';
+import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { normalizeRm } from '../../lib/rm.js';
+import { hashPassword } from '../../lib/security.js';
 
 export async function adminRoutes(app: FastifyInstance) {
   // Autentica o control plane (master token OU operador). A autorização é por rota.
@@ -143,7 +144,7 @@ export async function adminRoutes(app: FastifyInstance) {
           items: {
             type: 'object',
             properties: {
-              rm: { type: 'string' }, name: { type: 'string' }, jaAcessou: { type: 'boolean' },
+              rm: { type: 'string' }, name: { type: 'string' }, jaAcessou: { type: 'boolean' }, mustChangePassword: { type: 'boolean' },
               groupId: { type: ['string', 'null'] }, group: { type: ['string', 'null'] }, createdAt: { type: 'string' },
             },
           },
@@ -153,12 +154,99 @@ export async function adminRoutes(app: FastifyInstance) {
   }, async () => {
     const students = await prisma.student.findMany({
       orderBy: { name: 'asc' },
-      select: { rm: true, name: true, passwordHash: true, createdAt: true, group: { select: { id: true, name: true } } },
+      select: { rm: true, name: true, passwordHash: true, mustChangePassword: true, createdAt: true, group: { select: { id: true, name: true } } },
     });
     return students.map((s) => ({
-      rm: s.rm, name: s.name, jaAcessou: s.passwordHash !== null,
+      rm: s.rm, name: s.name, jaAcessou: s.passwordHash !== null, mustChangePassword: s.mustChangePassword,
       groupId: s.group?.id ?? null, group: s.group?.name ?? null, createdAt: s.createdAt.toISOString(),
     }));
+  });
+
+  // ------------------------------------------------- EDITAR ALUNO (nome / grupo)
+  // Move de/para loja (groupId = string) ou desvincula (groupId = null → fica só
+  // com o login). O RM é a identidade (usada nos logs/tokens) e não é editável;
+  // para corrigir um RM errado, remova e recrie o aluno.
+  app.patch('/admin/students/:rm', {
+    preHandler: app.requirePermission('groups:write'),
+    schema: {
+      tags: ['Admin'], summary: 'Edita um aluno (nome e/ou grupo)', security: [{ adminToken: [] }],
+      params: { type: 'object', required: ['rm'], properties: { rm: { type: 'string' } } },
+      body: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', minLength: 1 },
+          groupId: { type: ['string', 'null'] },
+        },
+      },
+    },
+  }, async (request) => {
+    const rm = normalizeRm((request.params as { rm: string }).rm);
+    const { name, groupId } = request.body as { name?: string; groupId?: string | null };
+    const student = await prisma.student.findUnique({ where: { rm } });
+    if (!student) throw notFound('Aluno não encontrado.');
+
+    const data: { name?: string; groupId?: string | null } = {};
+    if (name !== undefined) data.name = name.trim();
+    if (groupId !== undefined) {
+      if (groupId) {
+        const group = await prisma.group.findUnique({ where: { id: groupId }, select: { id: true } });
+        if (!group) throw notFound('Loja de destino não encontrada.');
+      }
+      data.groupId = groupId;
+    }
+
+    const updated = await prisma.student.update({
+      where: { rm }, data,
+      select: { rm: true, name: true, passwordHash: true, mustChangePassword: true, createdAt: true, group: { select: { id: true, name: true } } },
+    });
+    await recordAudit(request.operator!, 'student.updated', { targetType: 'student', targetId: rm, meta: { name: data.name, groupId: data.groupId } });
+    return {
+      rm: updated.rm, name: updated.name, jaAcessou: updated.passwordHash !== null, mustChangePassword: updated.mustChangePassword,
+      groupId: updated.group?.id ?? null, group: updated.group?.name ?? null, createdAt: updated.createdAt.toISOString(),
+    };
+  });
+
+  // ----------------------------------------------------- RESETAR SENHA DO ALUNO
+  // Sem body → volta ao 1º acesso (senha = RM, troca forçada). Com `password` →
+  // define uma senha específica (o aluno ainda é obrigado a trocar no login).
+  app.post('/admin/students/:rm/reset-password', {
+    preHandler: app.requirePermission('groups:write'),
+    schema: {
+      tags: ['Admin'], summary: 'Reseta a senha do aluno (padrão: volta a ser o RM)', security: [{ adminToken: [] }],
+      params: { type: 'object', required: ['rm'], properties: { rm: { type: 'string' } } },
+      body: { type: 'object', properties: { password: { type: 'string', minLength: 6 } } },
+    },
+  }, async (request) => {
+    const rm = normalizeRm((request.params as { rm: string }).rm);
+    const { password } = (request.body ?? {}) as { password?: string };
+    const student = await prisma.student.findUnique({ where: { rm } });
+    if (!student) throw notFound('Aluno não encontrado.');
+
+    if (password && password.trim()) {
+      if (normalizeRm(password) === rm) throw badRequest('A senha não pode ser o próprio RM.');
+      await prisma.student.update({ where: { rm }, data: { passwordHash: await hashPassword(password.trim()), mustChangePassword: true } });
+    } else {
+      // Sem hash → o login volta a aceitar o próprio RM como senha (1º acesso).
+      await prisma.student.update({ where: { rm }, data: { passwordHash: null, mustChangePassword: true } });
+    }
+    await recordAudit(request.operator!, 'student.password_reset', { targetType: 'student', targetId: rm, meta: { custom: Boolean(password) } });
+    return { rm, reset: true, toRm: !(password && password.trim()) };
+  });
+
+  // ---------------------------------------------------------------- REMOVER ALUNO
+  app.delete('/admin/students/:rm', {
+    preHandler: app.requirePermission('groups:write'),
+    schema: {
+      tags: ['Admin'], summary: 'Remove um aluno (apaga o login)', security: [{ adminToken: [] }],
+      params: { type: 'object', required: ['rm'], properties: { rm: { type: 'string' } } },
+    },
+  }, async (request, reply) => {
+    const rm = normalizeRm((request.params as { rm: string }).rm);
+    const student = await prisma.student.findUnique({ where: { rm } });
+    if (!student) throw notFound('Aluno não encontrado.');
+    await prisma.student.delete({ where: { rm } });
+    await recordAudit(request.operator!, 'student.deleted', { targetType: 'student', targetId: rm, meta: { name: student.name } });
+    return reply.code(204).send();
   });
 
   // ------------------------------------------------------------- LISTAR GRUPOS
