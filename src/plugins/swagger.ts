@@ -18,6 +18,12 @@ export const swaggerPlugin = fp(async (app) => {
           'o RM do aluno (header **X-Student-RM**) em cada chamada.',
         version: '1.0.0',
       },
+      // Base URL das requisições na referência/playground. As rotas já têm o
+      // prefixo /v1, então o server é só a origem (sem /v1).
+      servers: [
+        { url: 'https://api.mockmerce.com.br', description: 'Produção' },
+        { url: 'http://localhost:3333', description: 'Local (desenvolvimento)' },
+      ],
       components: {
         securitySchemes: {
           apiKey: {
