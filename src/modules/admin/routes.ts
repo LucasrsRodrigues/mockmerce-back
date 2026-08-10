@@ -342,12 +342,14 @@ export async function adminRoutes(app: FastifyInstance) {
               properties: { rm: { type: 'string' }, name: { type: 'string' } },
             },
           },
+          // Quando true, RMs que já estão em outra loja são MOVIDOS para este grupo.
+          confirmMove: { type: 'boolean' },
         },
       },
     },
   }, async (request) => {
     const { id } = request.params as { id: string };
-    const { students } = request.body as { students: { rm: string; name: string }[] };
+    const { students, confirmMove } = request.body as { students: { rm: string; name: string }[]; confirmMove?: boolean };
     const group = await prisma.group.findUnique({ where: { id } });
     if (!group) throw notFound('Grupo não encontrado.');
 
@@ -355,19 +357,35 @@ export async function adminRoutes(app: FastifyInstance) {
     for (const s of students) { const rm = normalizeRm(s.rm); if (rm) nameByRm.set(rm, s.name.trim()); }
     const rms = [...nameByRm.keys()];
 
-    const existing = await prisma.student.findMany({ where: { rm: { in: rms } }, select: { rm: true, groupId: true } });
-    const inOther = existing.filter((e) => e.groupId && e.groupId !== id).map((e) => e.rm);
-    if (inOther.length) throw conflict(`RM(s) já em outro grupo: ${inOther.join(', ')}.`);
+    const existing = await prisma.student.findMany({ where: { rm: { in: rms } }, select: { rm: true, name: true, groupId: true } });
+    const inOther = existing.filter((e) => e.groupId && e.groupId !== id);
+    if (inOther.length && confirmMove !== true) {
+      // Há RM(s) em outra loja e a migração não foi confirmada → devolve os conflitos
+      // (de qual loja cada um vem) e NÃO altera nada. O painel confirma e reenvia.
+      const groups = await prisma.group.findMany({ where: { id: { in: [...new Set(inOther.map((e) => e.groupId!))] } }, select: { id: true, name: true } });
+      const nameByGroup = new Map(groups.map((g) => [g.id, g.name]));
+      return {
+        needsConfirmation: true,
+        conflicts: inOther.map((e) => ({ rm: e.rm, name: e.name, currentGroup: { id: e.groupId!, name: nameByGroup.get(e.groupId!) ?? '—' } })),
+      };
+    }
 
     const existingRms = new Set(existing.map((e) => e.rm));
     // Alunos importados sem grupo → VINCULA a este grupo (preserva o nome do roster).
     const toLink = existing.filter((e) => e.groupId === null).map((e) => e.rm);
+    // Alunos em OUTRA loja (migração confirmada) → MOVE para este grupo.
+    const toMove = inOther.map((e) => e.rm);
     // RMs ainda inexistentes → cria já no grupo.
     const toCreate = rms.filter((rm) => !existingRms.has(rm)).map((rm) => ({ rm, name: nameByRm.get(rm)!, groupId: id }));
 
     if (toLink.length) await prisma.student.updateMany({ where: { rm: { in: toLink } }, data: { groupId: id } });
+    if (toMove.length) await prisma.student.updateMany({ where: { rm: { in: toMove } }, data: { groupId: id } });
     if (toCreate.length) await prisma.student.createMany({ data: toCreate });
-    return { added: toLink.length + toCreate.length };
+    // Auditoria por aluno movido: guarda de/para (logs/XP ficam com a loja de origem).
+    for (const e of inOther) {
+      await recordAudit(request.operator!, 'member.moved', { targetType: 'student', targetId: e.rm, groupId: id, meta: { fromGroupId: e.groupId, toGroupId: id } });
+    }
+    return { added: toLink.length + toCreate.length, moved: toMove.length };
   });
 
   // ------------------------------------------------------------- LOGS DE ATIVIDADE

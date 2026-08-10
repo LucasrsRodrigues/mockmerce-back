@@ -157,17 +157,37 @@ export async function settingsRoutes(app: FastifyInstance) {
   app.post('/store/members', {
     schema: {
       tags: ['Configurações'], summary: 'Adiciona um aluno (RM) ao grupo', security: sec,
-      body: { type: 'object', required: ['rm', 'name'], properties: { rm: { type: 'string', minLength: 1 }, name: { type: 'string', minLength: 1 } } },
-      response: { 201: { type: 'object', properties: { rm: { type: 'string' }, name: { type: 'string' } } } },
+      body: { type: 'object', required: ['rm', 'name'], properties: { rm: { type: 'string', minLength: 1 }, name: { type: 'string', minLength: 1 }, confirmMove: { type: 'boolean' } } },
+      response: {
+        // 200 = aluno já está em OUTRA loja e o cliente precisa confirmar a migração.
+        200: { type: 'object', properties: {
+          needsConfirmation: { type: 'boolean' }, rm: { type: 'string' }, name: { type: 'string' },
+          currentGroup: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+        } },
+        201: { type: 'object', properties: { rm: { type: 'string' }, name: { type: 'string' }, moved: { type: 'boolean' } } },
+      },
     },
   }, async (req, reply) => {
     const groupId = req.group!.id;
     const rm = normalizeRm((req.body as any).rm);
     const name = (req.body as any).name.trim();
-    const existing = await prisma.student.findUnique({ where: { rm }, select: { id: true, groupId: true } });
+    const confirmMove = (req.body as any).confirmMove === true;
+    const existing = await prisma.student.findUnique({ where: { rm }, select: { id: true, name: true, groupId: true } });
     if (existing) {
       if (existing.groupId === groupId) throw conflict(`RM ${rm} já está neste grupo.`);
-      if (existing.groupId) throw conflict(`RM ${rm} já pertence a outro grupo. Fale com o professor.`);
+      if (existing.groupId) {
+        // Aluno pertence a OUTRA loja → migração entre times. Só a `groupId` muda;
+        // logs/XP/missões que ele gerou continuam com a loja de origem (nunca desvinculados).
+        const from = await prisma.group.findUnique({ where: { id: existing.groupId }, select: { id: true, name: true } });
+        if (!confirmMove) {
+          // 1ª etapa: avisa de qual loja ele vem e pede confirmação. NADA é alterado aqui.
+          return reply.code(200).send({ needsConfirmation: true, rm, name: existing.name, currentGroup: from });
+        }
+        // 2ª etapa (confirmada): move para esta loja.
+        const moved = await prisma.student.update({ where: { id: existing.id }, data: { groupId }, select: { rm: true, name: true } });
+        await recordAudit(req.operator ?? { id: null, email: null, role: 'ADMIN', isMaster: false }, 'member.moved', { targetType: 'student', targetId: rm, groupId, meta: { fromGroupId: from?.id, fromGroupName: from?.name, toGroupId: groupId, byRm: req.rm } });
+        return reply.code(201).send({ ...moved, moved: true });
+      }
       // Aluno importado (sem grupo) → VINCULA a esta loja, preservando o nome do roster.
       const linked = await prisma.student.update({ where: { id: existing.id }, data: { groupId }, select: { rm: true, name: true } });
       await recordAudit(req.operator ?? { id: null, email: null, role: 'ADMIN', isMaster: false }, 'member.linked', { targetType: 'student', targetId: rm, groupId, meta: { byRm: req.rm } });
