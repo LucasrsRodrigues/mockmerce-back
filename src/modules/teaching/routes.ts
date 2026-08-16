@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../../prisma.js';
-import { dashboard, ranking, submit } from './service.js';
+import { badRequest } from '../../lib/errors.js';
+import { dashboard, ranking, submit, studentProfile } from './service.js';
 
 const sec = [{ apiKey: [], studentRm: [] }];
 
@@ -11,6 +12,13 @@ export async function teachingRoutes(app: FastifyInstance) {
   app.get('/teaching/dashboard', {
     schema: { tags: ['Ensino'], summary: 'Painel do grupo: missões, XP, badges, nota e o que falta', security: sec },
   }, async (req) => dashboard(req.group!.id));
+
+  app.get('/teaching/profile', {
+    schema: { tags: ['Ensino'], summary: 'Perfil do aluno logado: badges individuais (conquistadas + bloqueadas com progresso)', security: sec },
+  }, async (req) => {
+    if (!req.rm) throw badRequest('Perfil individual requer login de aluno (header X-Student-RM).');
+    return studentProfile(req.group!.id, req.rm);
+  });
 
   app.get('/teaching/ranking', {
     schema: { tags: ['Ensino'], summary: 'Ranking de grupos por XP (respeita opt-out)', security: sec },

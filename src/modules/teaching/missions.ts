@@ -1,4 +1,5 @@
 import { prisma } from '../../prisma.js';
+import { INDIVIDUAL_BADGES } from './badges.js';
 
 /**
  * Catálogo declarativo de missões e badges (policy as data — DDD domain service).
@@ -46,8 +47,21 @@ export const STATE_CHECKS: Record<string, (groupId: string) => Promise<boolean>>
 
 /** Sincroniza o registro (badges + missões) no banco. Idempotente. */
 export async function syncRegistry(): Promise<void> {
+  // Badges de GRUPO (concedidas por missão com badgeKey).
   for (const b of BADGES) {
-    await prisma.badge.upsert({ where: { key: b.key }, create: b, update: { name: b.name, icon: b.icon, description: b.description } });
+    await prisma.badge.upsert({
+      where: { key: b.key },
+      create: { ...b, scope: 'GROUP' },
+      update: { name: b.name, icon: b.icon, description: b.description, scope: 'GROUP' },
+    });
+  }
+  // Badges INDIVIDUAIS (por RM), com tier + critério.
+  for (const b of INDIVIDUAL_BADGES) {
+    await prisma.badge.upsert({
+      where: { key: b.key },
+      create: { key: b.key, name: b.name, icon: b.icon, description: b.description, tier: b.tier, scope: 'INDIVIDUAL', criteria: b.criteria as any },
+      update: { name: b.name, icon: b.icon, description: b.description, tier: b.tier, scope: 'INDIVIDUAL', criteria: b.criteria as any },
+    });
   }
   for (const m of MISSIONS) {
     await prisma.mission.upsert({

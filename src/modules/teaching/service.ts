@@ -1,6 +1,7 @@
 import { prisma } from '../../prisma.js';
 import { tenantScope } from '../../lib/tenantScope.js';
 import { MISSIONS, STATE_CHECKS, syncRegistry } from './missions.js';
+import { INDIVIDUAL_BADGES, evalIndividualProgress } from './badges.js';
 
 interface EvalResult { met: boolean; byRm: string | null; evidence: Record<string, unknown> }
 
@@ -83,6 +84,67 @@ export async function evaluateGroup(groupId: string): Promise<void> {
       }
     });
   }
+
+  // Badges INDIVIDUAIS: avalia cada aluno do grupo (por RM). Idempotente.
+  const students = await prisma.student.findMany({ where: { groupId }, select: { rm: true } });
+  for (const s of students) await evaluateStudentBadges(groupId, s.rm);
+}
+
+/** Concede as badges individuais que o RM já cumpriu (não re-avalia as que já tem). */
+export async function evaluateStudentBadges(groupId: string, rm: string): Promise<void> {
+  const badgeRows = await prisma.badge.findMany({ where: { scope: 'INDIVIDUAL' }, select: { id: true, key: true } });
+  const idByKey = new Map(badgeRows.map((b) => [b.key, b.id]));
+  const already = await prisma.studentBadge.findMany({ where: { rm }, select: { badgeId: true } });
+  const have = new Set(already.map((a) => a.badgeId));
+
+  for (const def of INDIVIDUAL_BADGES) {
+    const badgeId = idByKey.get(def.key);
+    if (!badgeId || have.has(badgeId)) continue; // não existe ou já conquistada
+    const { current, target } = await evalIndividualProgress(groupId, rm, def.criteria);
+    if (current >= target) {
+      await prisma.studentBadge.upsert({
+        where: { rm_badgeId: { rm, badgeId } },
+        create: { groupId, rm, badgeId },
+        update: {},
+      });
+    }
+  }
+}
+
+/** Perfil do aluno (por RM): todas as badges individuais com estado e progresso. */
+export async function studentProfile(groupId: string, rm: string) {
+  await evaluateGroup(groupId); // mantém fresco (avalia missões + badges de todos os RMs)
+
+  const badgeRows = await prisma.badge.findMany({ where: { scope: 'INDIVIDUAL' }, select: { id: true, key: true } });
+  const idByKey = new Map(badgeRows.map((b) => [b.key, b.id]));
+  const earned = await prisma.studentBadge.findMany({ where: { rm }, select: { badgeId: true, awardedAt: true } });
+  const awardedAtById = new Map(earned.map((e) => [e.badgeId, e.awardedAt]));
+
+  const badges = [];
+  for (const def of INDIVIDUAL_BADGES) {
+    const id = idByKey.get(def.key);
+    const awardedAt = id ? awardedAtById.get(id) : undefined;
+    const { current, target } = await evalIndividualProgress(groupId, rm, def.criteria);
+    badges.push({
+      key: def.key, name: def.name, icon: def.icon, description: def.description, tier: def.tier,
+      earned: Boolean(awardedAt),
+      awardedAt: awardedAt ? awardedAt.toISOString() : null,
+      // Barra cheia quando conquistada; senão o quanto falta.
+      progress: { current: Math.min(current, target), target },
+    });
+  }
+
+  const xp = (await prisma.xpLedger.aggregate({ where: { groupId, rm }, _sum: { points: true } }))._sum.points ?? 0;
+  const student = await prisma.student.findFirst({ where: { groupId, rm }, select: { name: true } });
+
+  return {
+    rm,
+    nome: student?.name ?? rm,
+    xp,
+    conquistadas: badges.filter((b) => b.earned).length,
+    total: badges.length,
+    badges,
+  };
 }
 
 // ------------------------------------------------------------- Nota + XP

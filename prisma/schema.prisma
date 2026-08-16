@@ -61,6 +61,7 @@ model Group {
   config           GroupConfig?
   missionProgress  MissionProgress[]
   groupBadges      GroupBadge[]
+  studentBadges    StudentBadge[]
   xpLedger         XpLedger[]
   submissions      Submission[]
   teachingSettings GroupTeachingSettings?
@@ -894,7 +895,30 @@ model Badge {
   name        String
   icon        String
   description String
+  /// Nível visual do medalhão: BRONZE | SILVER | GOLD | PLATINUM (define a cor).
+  tier        String       @default("BRONZE")
+  /// GROUP = conquista do time (GroupBadge) | INDIVIDUAL = do aluno por RM (StudentBadge).
+  scope       String       @default("GROUP")
+  /// Critério das badges INDIVIDUAL (avaliação por RM). Null para badges de missão (GROUP).
+  criteria    Json?
   groupBadges GroupBadge[]
+  studentBadges StudentBadge[]
+}
+
+/// Conquista INDIVIDUAL de um aluno, identificada pelo RM (como XpLedger/RequestLog).
+/// Segue o aluno mesmo se ele mudar de grupo; groupId guarda ONDE foi conquistada.
+model StudentBadge {
+  id        String   @id @default(cuid())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId   String
+  rm        String
+  badge     Badge    @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  badgeId   String
+  awardedAt DateTime @default(now())
+
+  @@unique([rm, badgeId])
+  @@index([groupId])
+  @@index([rm])
 }
 
 model GroupBadge {
