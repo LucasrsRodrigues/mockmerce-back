@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../../prisma.js';
 import { hashPassword, verifyPassword, signCustomerToken } from '../../lib/security.js';
@@ -98,6 +99,94 @@ export async function customerRoutes(app: FastifyInstance) {
       token,
       customer: { id: customer.id, name: customer.name, email: customer.email },
     };
+  });
+
+  // ---- Esqueci a senha: pede um código (cai no mock de e-mails) --------------
+  app.post('/auth/forgot-password', {
+    schema: {
+      tags: ['Auth Cliente'],
+      summary: 'Solicita um código de redefinição de senha (cai no mock de e-mails)',
+      security: [{ apiKey: [], studentRm: [] }],
+      body: {
+        type: 'object',
+        required: ['email'],
+        properties: { email: { type: 'string', format: 'email' } },
+      },
+      response: { 200: { type: 'object', properties: { message: { type: 'string' } } } },
+    },
+  }, async (request) => {
+    const groupId = request.group!.id;
+    const { email } = request.body as { email: string };
+
+    const customer = await prisma.customer.findUnique({ where: { groupId_email: { groupId, email } } });
+    // Anti-enumeração: a resposta é sempre a mesma, exista o e-mail ou não.
+    if (customer) {
+      const code = String(randomInt(100000, 1000000)); // 6 dígitos
+      const codeHash = await hashPassword(code);
+      const expiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+
+      // Invalida qualquer código anterior não usado deste cliente.
+      await prisma.passwordReset.updateMany({
+        where: { customerId: customer.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+      await prisma.passwordReset.create({ data: { customerId: customer.id, codeHash, expiresAt } });
+
+      // O código em texto vai só no "e-mail" (mock). No banco fica só o hash.
+      await prisma.emailOutbox.create({
+        data: {
+          groupId,
+          to: customer.email,
+          template: 'password_reset',
+          payload: { name: customer.name, code, expiresInMinutes: 30 },
+        },
+      });
+    }
+
+    return { message: 'Se o e-mail existir, enviamos um código de redefinição.' };
+  });
+
+  // ---- Redefine a senha com o código -----------------------------------------
+  app.post('/auth/reset-password', {
+    schema: {
+      tags: ['Auth Cliente'],
+      summary: 'Redefine a senha com o código recebido por e-mail',
+      security: [{ apiKey: [], studentRm: [] }],
+      body: {
+        type: 'object',
+        required: ['email', 'code', 'newPassword'],
+        properties: {
+          email: { type: 'string', format: 'email' },
+          code: { type: 'string', minLength: 4 },
+          newPassword: { type: 'string', minLength: 6 },
+        },
+      },
+      response: { 200: { type: 'object', properties: { token: { type: 'string' }, customer: customerSchema } } },
+    },
+  }, async (request) => {
+    const groupId = request.group!.id;
+    const { email, code, newPassword } = request.body as { email: string; code: string; newPassword: string };
+
+    const customer = await prisma.customer.findUnique({ where: { groupId_email: { groupId, email } } });
+    if (!customer) throw unauthorized('Código inválido ou expirado.');
+
+    const reset = await prisma.passwordReset.findFirst({
+      where: { customerId: customer.id, usedAt: null, expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!reset || !(await verifyPassword(code, reset.codeHash))) {
+      throw unauthorized('Código inválido ou expirado.');
+    }
+
+    const passwordHash = await hashPassword(newPassword);
+    await prisma.$transaction([
+      prisma.customer.update({ where: { id: customer.id }, data: { passwordHash } }),
+      prisma.passwordReset.update({ where: { id: reset.id }, data: { usedAt: new Date() } }),
+    ]);
+
+    // Já devolve um token (login automático após redefinir).
+    const token = signCustomerToken({ sub: customer.id, groupId, email });
+    return { token, customer: { id: customer.id, name: customer.name, email: customer.email } };
   });
 
   app.get('/auth/me', {

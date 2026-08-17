@@ -339,10 +339,25 @@ model Customer {
   addresses Address[]
   favorites Favorite[]
   segments  CustomerSegmentMember[]
+  passwordResets PasswordReset[]
 
   // Email é único DENTRO do grupo (grupos diferentes podem ter o mesmo email).
   @@unique([groupId, email])
   @@index([groupId])
+}
+
+/// Código de "esqueci a senha" do cliente final. O código em texto vai só no
+/// e-mail (mock EmailOutbox); no banco guardamos apenas o HASH, com validade.
+model PasswordReset {
+  id         String    @id @default(cuid())
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId String
+  codeHash   String
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([customerId])
 }
 
 // ---------------------------------------------------------------------------
