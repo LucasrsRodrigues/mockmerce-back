@@ -66,6 +66,7 @@ model Group {
   submissions      Submission[]
   teachingSettings GroupTeachingSettings?
   apiKeys          ApiKey[]
+  mediaAssets      MediaAsset[]
 
   @@index([apiKeyPrefix])
 }
@@ -294,17 +295,61 @@ model VariantOptionValue {
   @@index([variantId])
 }
 
+/// Mídia exibida no produto (ou numa variante). Apesar do nome histórico, guarda
+/// IMAGEM e VÍDEO — o campo `kind` distingue. A URL pode vir de um upload
+/// (mediaId preenchido, arquivo no S3) ou ser digitada à mão (mediaId null).
 model ProductImage {
   id        String          @id @default(cuid())
   product   Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
   productId String
   variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
   variantId String?
+  /// Arquivo da biblioteca de mídia. Apagar a mídia remove este vínculo junto.
+  media     MediaAsset?     @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  mediaId   String?
+  kind      MediaKind       @default(IMAGE)
   url       String
   position  Int             @default(0)
   isPrimary Boolean         @default(false)
 
   @@index([productId])
+  @@index([mediaId])
+}
+
+/// Tipo de arquivo aceito no upload.
+enum MediaKind {
+  IMAGE
+  VIDEO
+}
+
+/// Biblioteca de mídia do grupo (f4-media-uploads). O binário vive no S3; aqui
+/// fica só o ponteiro (key no bucket + URL pública) e os metadados. Como toda
+/// entidade de negócio, pertence a um Group — o prefixo da key no bucket também
+/// é por grupo (groups/<groupId>/...), então o isolamento vale no storage.
+model MediaAsset {
+  id           String    @id @default(cuid())
+  group        Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId      String
+  kind         MediaKind
+  /// Caminho do objeto no bucket (ex.: "groups/<groupId>/2026/09/a1b2c3.jpg").
+  key          String    @unique
+  /// URL pública final (S3 direto ou CDN, conforme S3_PUBLIC_BASE_URL).
+  url          String
+  /// MIME detectado pelos magic bytes do arquivo — não o que o cliente declarou.
+  mimeType     String
+  sizeBytes    Int
+  /// Nome original do arquivo (só para exibir no painel).
+  originalName String?
+  /// Pasta lógica dentro do grupo (ex.: "produtos", "banners"). Só organização.
+  folder       String?
+  /// RM do aluno que subiu o arquivo (mesmo rastreio do RequestLog).
+  uploadedByRm String?
+  createdAt    DateTime  @default(now())
+
+  productImages ProductImage[]
+
+  @@index([groupId, createdAt])
+  @@index([groupId, kind])
 }
 
 /// Produtos relacionados / cross-sell / upsell (ambos do mesmo grupo).

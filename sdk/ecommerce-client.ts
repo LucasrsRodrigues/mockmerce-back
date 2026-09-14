@@ -42,9 +42,46 @@ export interface ProductVariant {
   label: string | null; // ex.: "Preto / P"
   options: { option: string; value: string }[];
   images: ProductImage[];
+  /** Vídeos (mesma estrutura das imagens, kind = 'VIDEO'). */
+  videos: ProductImage[];
 }
 
-export interface ProductImage { id: string; url: string; position: number; isPrimary: boolean }
+export interface ProductImage {
+  id: string;
+  url: string;
+  /** IMAGE ou VIDEO — a mesma lista guarda os dois. */
+  kind: MediaKind;
+  /** Id na biblioteca de mídia quando veio de um upload; null se a URL é externa. */
+  mediaId: string | null;
+  position: number;
+  isPrimary: boolean;
+}
+
+export type MediaKind = 'IMAGE' | 'VIDEO';
+
+/** Arquivo na biblioteca de mídia da loja (upload no S3). */
+export interface MediaAsset {
+  id: string;
+  kind: MediaKind;
+  url: string;
+  mimeType: string;
+  sizeBytes: number;
+  originalName: string | null;
+  folder: string | null;
+  uploadedByRm: string | null;
+  createdAt: string;
+}
+
+/**
+ * O que se manda como arquivo no upload.
+ *
+ * - No navegador: um `File` ou `Blob` (ex.: `input.files[0]`).
+ * - No React Native: `{ uri, name, type }` — o objeto que o RN entende no
+ *   FormData (a `uri` vem do ImagePicker).
+ */
+export type UploadInput =
+  | Blob
+  | { uri: string; name?: string; type?: string };
 
 /** Item retornado na LISTAGEM (resumo). */
 export interface ProductSummary {
@@ -79,6 +116,8 @@ export interface Product {
   options: { id: string; name: string; values: { id: string; value: string }[] }[];
   variants: ProductVariant[];
   images: ProductImage[];
+  /** Vídeos (mesma estrutura das imagens, kind = 'VIDEO'). */
+  videos: ProductImage[];
   related: { kind: string; product: { id: string; name: string; slug: string } }[];
   createdAt: string;
 }
@@ -208,6 +247,31 @@ export class EcommerceClient {
     return json as T;
   }
 
+  /**
+   * Envia multipart/form-data. Não setamos Content-Type na mão de propósito: o
+   * fetch precisa gerar o boundary sozinho — fixar o header quebra o upload.
+   */
+  private async upload<T>(path: string, file: UploadInput, fields: Record<string, string | number | boolean | undefined> = {}): Promise<T> {
+    const headers: Record<string, string> = { 'X-API-Key': this.apiKey };
+    if (this.studentRm) headers['X-Student-RM'] = this.studentRm;
+    if (this.customerToken) headers['Authorization'] = `Bearer ${this.customerToken}`;
+
+    const form = new FormData();
+    // No React Native o objeto { uri, name, type } é o formato nativo esperado.
+    form.append('file', file as unknown as Blob);
+    for (const [k, v] of Object.entries(fields)) {
+      if (v !== undefined) form.append(k, String(v));
+    }
+
+    const res = await fetch(`${this.baseUrl}${path}`, { method: 'POST', headers, body: form });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = (json as { error?: { code?: string; message?: string } }).error;
+      throw new ApiError(res.status, err?.code ?? 'ERROR', err?.message ?? res.statusText);
+    }
+    return json as T;
+  }
+
   private qs(params: Record<string, unknown>): string {
     const s = new URLSearchParams(
       Object.entries(params).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => [k, String(v)]),
@@ -246,8 +310,35 @@ export class EcommerceClient {
     remove: (id: string) => this.request<void>('DELETE', `/products/${id}`),
     setRelations: (id: string, kind: 'RELATED' | 'CROSS_SELL' | 'UPSELL', relatedIds: string[]) =>
       this.request('PUT', `/products/${id}/relations`, { kind, relatedIds }),
-    addImage: (id: string, data: { url: string; variantId?: string; position?: number; isPrimary?: boolean }) =>
+    /** Vincula uma mídia já existente: por `mediaId` (upload) ou por `url` externa. */
+    addImage: (id: string, data: { mediaId?: string; url?: string; variantId?: string; position?: number; isPrimary?: boolean }) =>
       this.request<ProductImage>('POST', `/products/${id}/images`, data),
+    /** Ajusta uma mídia já vinculada: capa (`isPrimary`), ordem ou variante. */
+    updateImage: (imageId: string, data: { isPrimary?: boolean; position?: number; variantId?: string | null }) =>
+      this.request<ProductImage>('PATCH', `/images/${imageId}`, data),
+    /** Desvincula a mídia do produto (o arquivo continua na biblioteca). */
+    removeImage: (imageId: string) => this.request<void>('DELETE', `/images/${imageId}`),
+    /** Sobe o arquivo E já vincula ao produto, numa chamada só. */
+    addMedia: (id: string, file: UploadInput, opts: { variantId?: string; isPrimary?: boolean; position?: number } = {}) =>
+      this.upload<ProductImage & { media: MediaAsset }>(`/products/${id}/media`, file, opts),
+  };
+
+  // ------------------------------------------------------------- Mídia (upload S3)
+  media = {
+    /** Envia uma imagem ou vídeo e devolve a URL pública. */
+    upload: (file: UploadInput, opts: { folder?: string } = {}) =>
+      this.upload<MediaAsset>('/uploads', file, opts),
+    list: (params: { kind?: MediaKind; folder?: string; page?: number; pageSize?: number } = {}) =>
+      this.request<Paginated<MediaAsset>>('GET', `/media${this.qs(params)}`),
+    get: (id: string) => this.request<MediaAsset>('GET', `/media/${id}`),
+    /** Espaço usado, cota da loja e limites de upload. */
+    usage: () => this.request<{
+      files: number; usedBytes: number; quotaBytes: number; availableBytes: number;
+      usedPercent: number; maxFileBytes: number; acceptedMimeTypes: string[];
+    }>('GET', '/media/usage'),
+    /** Apaga do bucket. Use `force` se o arquivo estiver vinculado a algum produto. */
+    remove: (id: string, force = false) =>
+      this.request<{ deleted: boolean; unlinkedFrom: number }>('DELETE', `/media/${id}${force ? '?force=true' : ''}`),
   };
 
   variants = {

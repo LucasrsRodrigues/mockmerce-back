@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import { env } from './env.js';
 import './types.js';
 
@@ -11,6 +12,7 @@ import { idempotencyPlugin } from './plugins/idempotency.js';
 import { setErrorHandler } from './plugins/errorHandler.js';
 
 import { catalogRoutes } from './modules/catalog/routes.js';
+import { mediaRoutes } from './modules/media/routes.js';
 import { inventoryRoutes } from './modules/inventory/routes.js';
 import { webhookRoutes } from './modules/webhooks/routes.js';
 import { sandboxRoutes } from './modules/payments/routes.js';
@@ -27,6 +29,7 @@ import { teachingRoutes } from './modules/teaching/routes.js';
 import { adminRoutes } from './modules/admin/routes.js';
 import { adminInspectRoutes } from './modules/admin/inspect.js';
 import { adminDashboardRoutes } from './modules/admin/dashboard.js';
+import { adminAuthorshipRoutes } from './modules/admin/authorship.js';
 import { operatorRoutes } from './modules/admin/operators.js';
 import { teachingAdminRoutes } from './modules/teaching/adminRoutes.js';
 
@@ -87,6 +90,19 @@ export async function buildApp() {
     }
   });
 
+  // Upload de arquivos (multipart/form-data). O limite por arquivo é o do .env;
+  // 1 arquivo por requisição — o resto é descartado em media/routes.ts.
+  await app.register(multipart, {
+    limits: {
+      fileSize: env.UPLOAD_MAX_MB * 1024 * 1024,
+      files: 4,
+      fields: 10,
+    },
+    // Em vez de estourar com o erro cru do plugin, o arquivo chega truncado e o
+    // service devolve 413 FILE_TOO_LARGE com o limite em MB na mensagem.
+    throwFileSizeLimit: false,
+  });
+
   setErrorHandler(app);
 
   // Infra: docs, auth (decorators), logging, rate limit e idempotência (globais).
@@ -104,6 +120,7 @@ export async function buildApp() {
   await app.register(async (v1) => {
     await v1.register(storeAuthRoutes);
     await v1.register(catalogRoutes);
+    await v1.register(mediaRoutes);
     await v1.register(inventoryRoutes);
     await v1.register(webhookRoutes);
     await v1.register(sandboxRoutes);
@@ -122,6 +139,7 @@ export async function buildApp() {
   await app.register(adminRoutes);
   await app.register(adminInspectRoutes);
   await app.register(adminDashboardRoutes);
+  await app.register(adminAuthorshipRoutes);
   await app.register(operatorRoutes);
   await app.register(teachingAdminRoutes);
 

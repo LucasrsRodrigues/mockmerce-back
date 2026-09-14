@@ -231,17 +231,40 @@ export async function catalogRoutes(app: FastifyInstance) {
   // =====================================================================
   app.post('/products/:id/images', {
     schema: {
-      tags: ['Catálogo'], summary: 'Adiciona imagem (produto ou variante)', security: sec,
+      tags: ['Catálogo'],
+      summary: 'Vincula uma mídia ao produto (por mediaId de um upload ou por URL externa)',
+      description:
+        'Informe **mediaId** (de um POST /uploads) ou **url** (link externo). ' +
+        'Para subir o arquivo e vincular de uma vez, use POST /products/{id}/media.',
+      security: sec,
       params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
       body: {
-        type: 'object', required: ['url'],
-        properties: { url: { type: 'string' }, variantId: { type: 'string' }, position: { type: 'integer' }, isPrimary: { type: 'boolean' } },
+        type: 'object',
+        properties: {
+          mediaId: { type: 'string' }, url: { type: 'string' }, variantId: { type: 'string' },
+          position: { type: 'integer' }, isPrimary: { type: 'boolean' },
+        },
       },
     },
   }, async (req, reply) => reply.code(201).send(await addImage(req.group!.id, (req.params as any).id, req.body as any)));
 
+  app.patch('/images/:id', {
+    schema: {
+      tags: ['Catálogo'], summary: 'Ajusta a mídia do produto (capa, ordem ou variante)', security: sec,
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+      body: {
+        type: 'object',
+        properties: {
+          isPrimary: { type: 'boolean' },
+          position: { type: 'integer', minimum: 0 },
+          variantId: { type: 'string', nullable: true },
+        },
+      },
+    },
+  }, async (req) => updateImage(req.group!.id, (req.params as any).id, req.body as any));
+
   app.delete('/images/:id', {
-    schema: { tags: ['Catálogo'], summary: 'Remove imagem', security: sec,
+    schema: { tags: ['Catálogo'], summary: 'Desvincula a mídia do produto (o arquivo continua na biblioteca)', security: sec,
       params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } } },
   }, async (req, reply) => { await deleteImage(req.group!.id, (req.params as any).id); return reply.code(204).send(); });
 }
@@ -385,12 +408,72 @@ async function addImage(groupId: string, productId: string, body: any) {
     const v = await prisma.productVariant.findFirst({ where: tenantScope(groupId, { id: body.variantId, productId }), select: { id: true } });
     if (!v) throw badRequest('variantId não pertence a este produto.');
   }
-  const count = await prisma.productImage.count({ where: { productId } });
+
+  // Dois jeitos de apontar o arquivo: uma mídia da biblioteca (upload no S3) ou
+  // uma URL externa digitada. A mídia manda no tipo (IMAGE/VIDEO) e na URL.
+  let url: string = body.url;
+  let kind: 'IMAGE' | 'VIDEO' = 'IMAGE';
+  let mediaId: string | null = null;
+  if (body.mediaId) {
+    const media = await prisma.mediaAsset.findFirst({ where: tenantScope(groupId, { id: body.mediaId }), select: { id: true, url: true, kind: true } });
+    if (!media) throw badRequest('mediaId não encontrado na biblioteca desta loja.');
+    mediaId = media.id;
+    url = media.url;
+    kind = media.kind;
+  } else if (!url) {
+    throw badRequest('Informe "mediaId" (upload) ou "url" (link externo).');
+  }
+
+  const [count, imageCount] = await Promise.all([
+    prisma.productImage.count({ where: { productId } }),
+    prisma.productImage.count({ where: { productId, kind: 'IMAGE' } }),
+  ]);
   const img = await prisma.productImage.create({
-    data: { productId, variantId: body.variantId, url: body.url, position: body.position ?? count, isPrimary: body.isPrimary ?? count === 0 },
+    data: {
+      productId, variantId: body.variantId, mediaId, kind, url,
+      position: body.position ?? count,
+      // Capa automática: a PRIMEIRA imagem do produto. Vídeo nunca vira capa
+      // sozinho (o card da listagem mostra imagem), e um vídeo enviado antes
+      // não pode "roubar" a vaga de capa da primeira foto.
+      isPrimary: body.isPrimary ?? (kind === 'IMAGE' && imageCount === 0),
+    },
   });
   if (img.isPrimary) await prisma.productImage.updateMany({ where: { productId, id: { not: img.id } }, data: { isPrimary: false } });
   return serializeImage(img);
+}
+
+async function updateImage(groupId: string, id: string, body: any) {
+  const img = await prisma.productImage.findFirst({
+    where: { id, product: tenantScope(groupId) },
+    select: { id: true, productId: true, kind: true },
+  });
+  if (!img) throw notFound('Imagem não encontrada.');
+
+  if (body.isPrimary === true && img.kind !== 'IMAGE') {
+    throw badRequest('Só uma imagem pode ser a capa do produto.');
+  }
+  if (body.variantId) {
+    const v = await prisma.productVariant.findFirst({
+      where: tenantScope(groupId, { id: body.variantId, productId: img.productId }), select: { id: true },
+    });
+    if (!v) throw badRequest('variantId não pertence a este produto.');
+  }
+
+  const updated = await prisma.productImage.update({
+    where: { id },
+    data: {
+      ...(body.isPrimary !== undefined ? { isPrimary: body.isPrimary } : {}),
+      ...(body.position !== undefined ? { position: body.position } : {}),
+      ...(body.variantId !== undefined ? { variantId: body.variantId } : {}),
+    },
+  });
+  // Capa é exclusiva: promover uma rebaixa as outras do mesmo produto.
+  if (updated.isPrimary) {
+    await prisma.productImage.updateMany({
+      where: { productId: img.productId, id: { not: id } }, data: { isPrimary: false },
+    });
+  }
+  return serializeImage(updated);
 }
 
 async function deleteImage(groupId: string, id: string) {

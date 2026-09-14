@@ -21,3 +21,9 @@ export const conflict = (msg: string) => new AppError(409, 'CONFLICT', msg);
 export const noGroup = (msg = 'Você ainda não tem uma loja. Crie a sua para continuar.') =>
   new AppError(403, 'NO_GROUP', msg);
 export const unprocessable = (msg: string) => new AppError(422, 'UNPROCESSABLE', msg);
+/// Arquivo maior que o limite de upload (UPLOAD_MAX_MB).
+export const payloadTooLarge = (msg: string) => new AppError(413, 'FILE_TOO_LARGE', msg);
+/// Arquivo enviado num formato fora da allowlist (ver lib/fileType.ts).
+export const unsupportedMedia = (msg: string) => new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', msg);
+/// Recurso opcional não configurado no ambiente (ex.: upload sem S3_BUCKET).
+export const serviceUnavailable = (code: string, msg: string) => new AppError(503, code, msg);

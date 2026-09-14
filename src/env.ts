@@ -1,6 +1,15 @@
 import 'dotenv/config';
 import { z } from 'zod';
 
+/**
+ * Variável OPCIONAL vinda do .env: o dotenv entrega string VAZIA (não undefined)
+ * quando a linha existe mas está sem valor (FOO=""). Sem isto, `z.string().url()
+ * .optional()` quebra o boot em `FOO=""` — que é justamente como deixamos as
+ * variáveis não usadas no .env.example.
+ */
+const blankAsUndefined = (inner: z.ZodTypeAny) =>
+  z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), inner);
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().default(3333),
@@ -30,6 +39,28 @@ const schema = z.object({
   /// DEV apenas: permite endpoints http/loopback (para testar webhook local).
   /// Em produção mantenha false — o guard anti-SSRF bloqueia interno/metadata.
   WEBHOOK_ALLOW_INSECURE_TARGETS: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+
+  // ---- Upload de mídia (S3) ----
+  /// Bucket onde as imagens/vídeos das lojas são guardados. SEM ele, as rotas de
+  /// upload respondem 503 UPLOAD_DISABLED (o resto da API funciona normalmente).
+  S3_BUCKET: blankAsUndefined(z.string().optional()) as z.ZodType<string | undefined>,
+  AWS_REGION: blankAsUndefined(z.string().default('us-east-1')) as z.ZodType<string>,
+  /// Credenciais. Se omitidas, o SDK usa a cadeia padrão da AWS (role da task/EC2,
+  /// ~/.aws/credentials, variáveis de ambiente) — preferível em produção.
+  AWS_ACCESS_KEY_ID: blankAsUndefined(z.string().optional()) as z.ZodType<string | undefined>,
+  AWS_SECRET_ACCESS_KEY: blankAsUndefined(z.string().optional()) as z.ZodType<string | undefined>,
+  /// Endpoint S3 alternativo (MinIO, LocalStack, R2). Vazio = AWS.
+  S3_ENDPOINT: blankAsUndefined(z.string().url().optional()) as z.ZodType<string | undefined>,
+  /// Base pública das URLs devolvidas (CloudFront ou domínio próprio), SEM barra
+  /// no fim. Vazio = URL direta do bucket (https://<bucket>.s3.<region>.amazonaws.com).
+  S3_PUBLIC_BASE_URL: blankAsUndefined(z.string().url().optional()) as z.ZodType<string | undefined>,
+  /// ACL do objeto. Buckets modernos têm ACL desabilitada e ficam públicos por
+  /// bucket policy — nesse caso deixe vazio. Use "public-read" só em bucket legado.
+  S3_OBJECT_ACL: blankAsUndefined(z.string().optional()) as z.ZodType<string | undefined>,
+  /// Tamanho máximo de UM arquivo, em MB.
+  UPLOAD_MAX_MB: z.coerce.number().int().positive().default(50),
+  /// Cota total de storage POR GRUPO, em MB (anti noisy neighbor no bucket comum).
+  UPLOAD_QUOTA_MB_PER_GROUP: z.coerce.number().int().positive().default(500),
 });
 
 const parsed = schema.safeParse(process.env);

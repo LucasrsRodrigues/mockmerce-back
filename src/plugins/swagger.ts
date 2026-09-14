@@ -60,6 +60,7 @@ export const swaggerPlugin = fp(async (app) => {
       },
       tags: [
         { name: 'Catálogo', description: 'Categorias e produtos' },
+        { name: 'Mídia', description: 'Upload de imagens e vídeos (S3) e biblioteca da loja' },
         { name: 'Auth Cliente', description: 'Cadastro e login do comprador' },
         { name: 'Cliente', description: 'Endereços e favoritos do cliente logado' },
         { name: 'Carrinho', description: 'Carrinho do cliente logado' },

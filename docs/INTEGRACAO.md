@@ -132,7 +132,76 @@ await api.orders.pay(pedido.id, { method: 'CREDIT_CARD' });
 
 ---
 
-## 7. Pagamento e frete (sandbox — simulados)
+## 7. Enviar fotos e vídeos dos produtos
+
+O arquivo vai para a API em `multipart/form-data`; ela guarda no **Amazon S3** e
+devolve a **URL pública**. Essa URL é a que vocês usam no `<Image />` do app —
+ela não expira.
+
+**Jeito curto: sobe e já vincula ao produto.**
+
+```ts
+// React Native (expo-image-picker)
+const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'] });
+const foto = { uri: r.assets[0].uri, name: 'foto.jpg', type: 'image/jpeg' };
+
+const form = new FormData();
+form.append('file', foto as any);
+form.append('isPrimary', 'true');       // vira a capa do produto
+
+const res = await fetch(`${BASE}/products/${produtoId}/media`, {
+  method: 'POST',
+  headers: { 'X-API-Key': API_KEY },    // NÃO coloque Content-Type aqui!
+  body: form,
+});
+const { url } = await res.json();
+```
+
+> ⚠️ **Nunca** defina `Content-Type` na mão num upload. O `fetch` precisa gerar o
+> `boundary` sozinho; se vocês fixarem o header, o upload quebra. Esse é o erro
+> mais comum.
+
+**Jeito longo: biblioteca de mídia.** Útil para reaproveitar a mesma foto em
+vários produtos ou para montar uma galeria no painel.
+
+```ts
+// 1) sobe para a biblioteca da loja
+const media = await api.media.upload(foto, { folder: 'produtos' });
+// → { id, url, kind: 'IMAGE', mimeType, sizeBytes }
+
+// 2) vincula onde quiser (quantas vezes quiser)
+await api.products.addImage(produtoId, { mediaId: media.id, isPrimary: true });
+await api.products.addImage(outroProdutoId, { mediaId: media.id });
+```
+
+**Vídeo é igual**: mesmo endpoint, mesmo campo `file`. Na resposta do produto,
+imagem e vídeo vêm separados:
+
+```ts
+const prod = await api.products.get(produtoId);
+prod.images;  // só imagens — use no carrossel
+prod.videos;  // só vídeos  — use num player
+```
+
+**O que a API recusa (e por quê):**
+
+| Situação | Resposta |
+|---|---|
+| Arquivo que não é imagem/vídeo | `415` — o tipo é conferido pelos bytes, então renomear `.pdf` para `.jpg` não engana |
+| Arquivo acima do limite | `413` com o limite em MB na mensagem |
+| Loja sem espaço | `422` — veja quanto sobrou em `GET /media/usage` |
+| Apagar mídia em uso | `409` — use `DELETE /media/:id?force=true` se quiser apagar mesmo assim |
+
+Formatos aceitos: **JPEG, PNG, WebP, GIF, AVIF, MP4, WebM e MOV**.
+
+Para liberar espaço:
+
+```ts
+const { usedBytes, quotaBytes } = await api.media.usage();
+await api.media.remove(media.id);        // some do bucket também
+```
+
+## 8. Pagamento e frete (sandbox — simulados)
 
 Há **dois jeitos** de pagar:
 
@@ -168,7 +237,7 @@ POST /sandbox/shipments/:id/advance   // avança postado→trânsito→entregue 
 
 ---
 
-## 8. Como os erros chegam
+## 9. Como os erros chegam
 
 Sempre neste formato:
 
@@ -182,7 +251,7 @@ negócio (ex.: estoque, carrinho vazio).
 
 ---
 
-## 9. Gerar um SDK na linguagem de vocês (avançado)
+## 10. Gerar um SDK na linguagem de vocês (avançado)
 
 O spec OpenAPI está em `<URL-BASE>/docs/json`. Com ele dá para gerar um client em
 qualquer linguagem usando o [openapi-generator](https://openapi-generator.tech/):
@@ -198,7 +267,7 @@ Troquem `-g` por `java`, `dart`, `csharp`, `python` etc. conforme o app de você
 
 ---
 
-## 10. Webhooks (receber eventos em tempo real)
+## 11. Webhooks (receber eventos em tempo real)
 
 Em vez de ficar consultando a API, vocês podem **receber eventos** (ex.: `order.paid`,
 `product.low_stock`) automaticamente. Registrem uma URL pública do app de vocês:

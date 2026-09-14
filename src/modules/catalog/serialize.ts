@@ -47,12 +47,30 @@ export function serializeVariant(v: any) {
       option: ov.option?.name,
       value: ov.optionValue?.value,
     })),
-    images: (v.images ?? []).map(serializeImage),
+    images: onlyImages(v.images).map(serializeImage),
+    videos: onlyVideos(v.images).map(serializeImage),
   };
 }
 
 export function serializeImage(img: any) {
-  return { id: img.id, url: img.url, position: img.position, isPrimary: img.isPrimary };
+  return {
+    id: img.id,
+    url: img.url,
+    kind: img.kind ?? 'IMAGE',
+    mediaId: img.mediaId ?? null,
+    position: img.position,
+    isPrimary: img.isPrimary,
+  };
+}
+
+/** Só as imagens (compatibilidade: `images` nunca devolve vídeo). */
+function onlyImages(list: any[]) {
+  return (list ?? []).filter((m: any) => (m.kind ?? 'IMAGE') === 'IMAGE');
+}
+
+/** Só os vídeos do produto/variante. */
+function onlyVideos(list: any[]) {
+  return (list ?? []).filter((m: any) => m.kind === 'VIDEO');
 }
 
 /** Faixa de preço e estoque total agregados das variantes (para a listagem). */
@@ -69,7 +87,8 @@ function aggregateVariants(variants: any[]) {
 /** Resumo para listagem. */
 export function serializeProductSummary(p: any) {
   const agg = aggregateVariants(p.variants ?? []);
-  const primary = (p.images ?? []).find((i: any) => i.isPrimary) ?? (p.images ?? [])[0];
+  const imgs = onlyImages(p.images);
+  const primary = imgs.find((i: any) => i.isPrimary) ?? imgs[0];
   return {
     id: p.id,
     name: p.name,
@@ -107,7 +126,8 @@ export function serializeProduct(p: any) {
       values: (o.values ?? []).map((v: any) => ({ id: v.id, value: v.value })),
     })),
     variants: (p.variants ?? []).map(serializeVariant),
-    images: (p.images ?? []).map(serializeImage),
+    images: onlyImages(p.images).map(serializeImage),
+    videos: onlyVideos(p.images).map(serializeImage),
     related: (p.relationsFrom ?? []).map((r: any) => ({
       kind: r.kind,
       product: r.related,

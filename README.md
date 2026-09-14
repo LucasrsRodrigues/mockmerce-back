@@ -137,6 +137,7 @@ Para os alunos (todos exigem `X-API-Key`, ou o token de aluno do painel):
 | Área | Rotas |
 |---|---|
 | Catálogo | `GET/POST /products` (SIMPLE/VARIABLE), `GET/PUT/DELETE /products/:id`, variantes/imagens, `GET/POST /categories,/brands,/collections`, `GET /tags` |
+| Mídia (S3) | `POST /uploads` (multipart), `POST /products/:id/media` (sobe e vincula), `GET /media`, `GET /media/usage`, `DELETE /media/:id` |
 | Auth cliente | `POST /auth/register`, `POST /auth/login`, `GET /auth/me` |
 | Carrinho | `GET /cart`, `POST /cart/items` (por `variantId`), `PATCH/DELETE /cart/items/:id`, `DELETE /cart` |
 | Pedidos | `POST /orders/checkout` (reserva estoque), `GET /orders`, `GET /orders/:id`, `POST /orders/:id/cancel` |
@@ -161,6 +162,59 @@ Para os alunos (todos exigem `X-API-Key`, ou o token de aluno do painel):
 
 ---
 
+## Upload de imagens e vídeos (S3)
+
+O arquivo sobe em `multipart/form-data` para a API, que valida e repassa ao
+**Amazon S3**. A resposta traz a **URL pública final** — o binário nunca volta
+pela API, o app carrega direto do bucket/CDN.
+
+**Configuração** (`.env`): `S3_BUCKET`, `AWS_REGION` e credenciais. Sem
+`S3_BUCKET`, as rotas de mídia respondem `503 UPLOAD_DISABLED` e o restante da
+API segue funcionando. Passo a passo do bucket em [DEPLOY.md](../DEPLOY.md).
+
+**Dois caminhos para o aluno:**
+
+```bash
+# A) sobe e já vincula ao produto (1 chamada)
+curl -X POST https://api.mockmerce.com.br/v1/products/PROD_ID/media \
+  -H "X-API-Key: sk_live_..." -F "file=@foto.jpg" -F "isPrimary=true"
+
+# B) sobe para a biblioteca e vincula depois (reaproveita o mesmo arquivo)
+curl -X POST https://api.mockmerce.com.br/v1/uploads \
+  -H "X-API-Key: sk_live_..." -F "file=@foto.jpg" -F "folder=produtos"
+# → { "id": "med_...", "url": "https://.../foto.jpg", "kind": "IMAGE" }
+
+curl -X POST https://api.mockmerce.com.br/v1/products/PROD_ID/images \
+  -H "X-API-Key: sk_live_..." -H "Content-Type: application/json" \
+  -d '{"mediaId":"med_..."}'
+```
+
+No **React Native** (SDK em `sdk/ecommerce-client.ts`):
+
+```ts
+const foto = { uri: result.assets[0].uri, name: 'foto.jpg', type: 'image/jpeg' };
+const media = await api.media.upload(foto, { folder: 'produtos' });
+await api.products.addImage(produtoId, { mediaId: media.id, isPrimary: true });
+```
+
+**Regras aplicadas pela API:**
+
+| Regra | Comportamento |
+|---|---|
+| Formatos aceitos | JPEG, PNG, WebP, GIF, AVIF, MP4, WebM, MOV |
+| Detecção de tipo | Pelos **bytes** do arquivo, não pela extensão nem pelo `Content-Type` (um `.jpg` com HTML dentro é recusado com `415`) |
+| Tamanho por arquivo | `UPLOAD_MAX_MB` (padrão 50 MB) → `413 FILE_TOO_LARGE` |
+| Cota por grupo | `UPLOAD_QUOTA_MB_PER_GROUP` (padrão 500 MB) → `422`; consulte em `GET /media/usage` |
+| Isolamento | Cada grupo só enxerga a própria biblioteca; no bucket, os arquivos ficam sob `groups/<groupId>/…` |
+| Nome do arquivo | Sempre gerado pela API (aleatório), nunca o nome enviado — evita colisão e path traversal |
+| Apagar em uso | `DELETE /media/:id` devolve `409` se o arquivo estiver em algum produto; use `?force=true` |
+
+**Vídeos:** ficam na mesma lista de mídias do produto, separados na resposta —
+`images` traz só imagens (compatível com quem já consumia) e `videos` traz os
+vídeos. A capa (`isPrimary`) é sempre uma imagem.
+
+---
+
 ## Estrutura
 
 ```
@@ -168,9 +222,9 @@ src/
   app.ts            # monta o Fastify, plugins e rotas
   plugins/          # auth (3 camadas), erro, rate limit, idempotência, swagger
   lib/              # tenantScope (isolamento), apiKey, errors, serialize…
-  modules/          # domínios: catalog, cart, orders, inventory, payments,
-                    #           webhooks, customers, reports, settings,
-                    #           store-auth, teaching, admin
+  modules/          # domínios: catalog, media, cart, orders, inventory,
+                    #           payments, webhooks, customers, reports,
+                    #           settings, store-auth, teaching, admin
 prisma/
   schema.prisma     # modelo de dados (tenant = Group)
   migrations/       # histórico de migrações
