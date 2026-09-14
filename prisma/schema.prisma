@@ -67,6 +67,7 @@ model Group {
   teachingSettings GroupTeachingSettings?
   apiKeys          ApiKey[]
   mediaAssets      MediaAsset[]
+  reviews          Review[]
 
   @@index([apiKeyPrefix])
 }
@@ -213,6 +214,7 @@ model Product {
   collections   Collection[]      @relation("ProductCollections")
   relationsFrom ProductRelation[] @relation("RelationSource")
   relationsTo   ProductRelation[] @relation("RelationTarget")
+  reviews       Review[]
 
   @@unique([groupId, slug])
   @@index([groupId])
@@ -347,9 +349,62 @@ model MediaAsset {
   createdAt    DateTime  @default(now())
 
   productImages ProductImage[]
+  reviewImages  ReviewImage[]
 
   @@index([groupId, createdAt])
   @@index([groupId, kind])
+}
+
+/// Avaliação de um produto pelo CLIENTE FINAL (f5-reviews): nota, comentário e
+/// fotos. Só quem comprou avalia — a compra é comprovada pelo `order`, e o
+/// vínculo fica guardado para a vitrine poder exibir o selo "compra verificada".
+///
+/// A avaliação nasce VISÍVEL; a loja modera depois (`hidden`). É o fluxo das
+/// grandes lojas: nada trava esperando aprovação, mas a loja tira do ar o que
+/// for abusivo.
+model Review {
+  id         String   @id @default(cuid())
+  group      Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId  String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId String
+  /// Pedido que comprovou a compra. SetNull: apagar o pedido não apaga a
+  /// avaliação, ela só deixa de exibir o selo de compra verificada.
+  order      Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderId    String?
+  /// Nota de 1 a 5 (validada na rota, não no banco).
+  rating     Int
+  title      String?
+  comment    String   @default("")
+  /// Ocultada pela loja (moderação). Some da vitrine, mas continua no painel.
+  hidden       Boolean @default(false)
+  hiddenReason String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  images ReviewImage[]
+
+  /// Uma avaliação por cliente em cada produto (editar substitui a anterior).
+  @@unique([productId, customerId])
+  @@index([groupId, createdAt])
+  @@index([productId, hidden])
+}
+
+/// Foto que o cliente anexou à avaliação. Sempre vem de um upload
+/// (`POST /uploads`), então apagar o arquivo apaga o anexo junto.
+model ReviewImage {
+  id       String      @id @default(cuid())
+  review   Review      @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  reviewId String
+  media    MediaAsset? @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  mediaId  String?
+  url      String
+  position Int         @default(0)
+
+  @@index([reviewId])
+  @@index([mediaId])
 }
 
 /// Produtos relacionados / cross-sell / upsell (ambos do mesmo grupo).
@@ -385,6 +440,7 @@ model Customer {
   favorites Favorite[]
   segments  CustomerSegmentMember[]
   passwordResets PasswordReset[]
+  reviews   Review[]
 
   // Email é único DENTRO do grupo (grupos diferentes podem ter o mesmo email).
   @@unique([groupId, email])
@@ -455,6 +511,7 @@ model Order {
   events           OrderEvent[]
   internalComments OrderInternalComment[]
   invoice          FakeInvoice?
+  reviews          Review[]
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 

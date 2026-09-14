@@ -26,6 +26,7 @@ export const WEBHOOK_EVENTS = [
   'payment.declined',
   'shipment.updated',
   'cart.abandoned',
+  'review.created',
   'webhook.ping',
 ] as const;
 

@@ -84,8 +84,12 @@ function aggregateVariants(variants: any[]) {
   };
 }
 
+/** Nota média + total de avaliações, no formato que a vitrine consome. */
+export interface RatingAgg { average: number; count: number }
+const SEM_AVALIACAO: RatingAgg = { average: 0, count: 0 };
+
 /** Resumo para listagem. */
-export function serializeProductSummary(p: any) {
+export function serializeProductSummary(p: any, rating: RatingAgg = SEM_AVALIACAO) {
   const agg = aggregateVariants(p.variants ?? []);
   const imgs = onlyImages(p.images);
   const primary = imgs.find((i: any) => i.isPrimary) ?? imgs[0];
@@ -102,11 +106,12 @@ export function serializeProductSummary(p: any) {
     stock: agg.stock,
     image: primary?.url ?? null,
     variantsCount: (p.variants ?? []).length,
+    rating,
   };
 }
 
 /** Detalhe completo. */
-export function serializeProduct(p: any) {
+export function serializeProduct(p: any, rating: RatingAgg = SEM_AVALIACAO) {
   return {
     id: p.id,
     name: p.name,
@@ -132,6 +137,7 @@ export function serializeProduct(p: any) {
       kind: r.kind,
       product: r.related,
     })),
+    rating,
     createdAt: p.createdAt?.toISOString?.() ?? p.createdAt,
   };
 }

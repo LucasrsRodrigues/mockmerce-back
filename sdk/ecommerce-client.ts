@@ -59,6 +59,46 @@ export interface ProductImage {
 
 export type MediaKind = 'IMAGE' | 'VIDEO';
 
+/** Avaliação de um produto feita por um cliente que comprou. */
+export interface Review {
+  id: string;
+  rating: number;                 // 1 a 5
+  title: string | null;
+  comment: string;
+  images: { id: string; url: string; mediaId: string | null }[];
+  author: { name: string; id: string | null };   // "Maria S."
+  /** Ligada a um pedido pago — mostre o selo de "compra verificada". */
+  verifiedPurchase: boolean;
+  /** Ocultada pela loja (só aparece nas SUAS avaliações). */
+  hidden: boolean;
+  isMine: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Média, total e quantas notas de cada estrela (para as barrinhas). */
+export interface RatingSummary {
+  average: number;
+  count: number;
+  distribution: Record<'1' | '2' | '3' | '4' | '5', number>;
+}
+
+/** Resposta de `reviews.canReview` — use para decidir o que mostrar na tela. */
+export interface CanReview {
+  canReview: boolean;
+  reason: 'ALREADY_REVIEWED' | 'NOT_PURCHASED' | null;
+  message: string;
+  reviewId: string | null;
+}
+
+export interface ReviewInput {
+  rating: number;
+  title?: string | null;
+  comment?: string;
+  /** Ids de fotos já enviadas em `media.upload` (máx. 5). */
+  mediaIds?: string[];
+}
+
 /** Arquivo na biblioteca de mídia da loja (upload no S3). */
 export interface MediaAsset {
   id: string;
@@ -97,6 +137,8 @@ export interface ProductSummary {
   stock: number;
   image: string | null;
   variantsCount: number;
+  /** Nota média e total de avaliações — para as estrelinhas no card. */
+  rating: { average: number; count: number };
 }
 
 /** Produto DETALHADO (GET /products/:id). */
@@ -118,6 +160,8 @@ export interface Product {
   images: ProductImage[];
   /** Vídeos (mesma estrutura das imagens, kind = 'VIDEO'). */
   videos: ProductImage[];
+  /** Nota média e total de avaliações visíveis. */
+  rating: RatingSummary;
   related: { kind: string; product: { id: string; name: string; slug: string } }[];
   createdAt: string;
 }
@@ -321,6 +365,36 @@ export class EcommerceClient {
     /** Sobe o arquivo E já vincula ao produto, numa chamada só. */
     addMedia: (id: string, file: UploadInput, opts: { variantId?: string; isPrimary?: boolean; position?: number } = {}) =>
       this.upload<ProductImage & { media: MediaAsset }>(`/products/${id}/media`, file, opts),
+  };
+
+  // ------------------------------------------------------------- Avaliações
+  reviews = {
+    /** Avaliações de um produto + média e distribuição. Não exige login. */
+    list: (productId: string, params: {
+      rating?: number; withPhotos?: boolean;
+      sort?: 'recent' | 'rating_desc' | 'rating_asc';
+      page?: number; pageSize?: number;
+    } = {}) =>
+      this.request<Paginated<Review> & { summary: RatingSummary }>(
+        'GET', `/products/${productId}/reviews${this.qs(params)}`,
+      ),
+    /** O cliente logado pode avaliar? Chame antes de mostrar o formulário. */
+    canReview: (productId: string) =>
+      this.request<CanReview>('GET', `/products/${productId}/reviews/can-review`),
+    /** Cria a avaliação (exige pedido pago com o produto). */
+    create: (productId: string, data: ReviewInput) =>
+      this.request<Review>('POST', `/products/${productId}/reviews`, data),
+    update: (reviewId: string, data: Partial<ReviewInput>) =>
+      this.request<Review>('PATCH', `/reviews/${reviewId}`, data),
+    remove: (reviewId: string) => this.request<void>('DELETE', `/reviews/${reviewId}`),
+    /** As avaliações do cliente logado, com o produto de cada uma. */
+    mine: () => this.request<{ data: (Review & { product: { id: string; name: string; slug: string } })[] }>('GET', '/me/reviews'),
+    /** LOJA: lista tudo, inclusive o que foi ocultado. */
+    storeList: (params: { productId?: string; rating?: number; hidden?: boolean; page?: number; pageSize?: number } = {}) =>
+      this.request<Paginated<any>>('GET', `/store/reviews${this.qs(params)}`),
+    /** LOJA: oculta ou volta a exibir uma avaliação. */
+    setHidden: (reviewId: string, hidden: boolean, reason?: string) =>
+      this.request('PATCH', `/store/reviews/${reviewId}`, { hidden, reason }),
   };
 
   // ------------------------------------------------------------- Mídia (upload S3)

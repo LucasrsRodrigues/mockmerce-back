@@ -8,6 +8,7 @@ import {
   productDetailInclude, serializeProduct, serializeProductSummary,
   serializeVariant, serializeImage, variantInclude, variantLabel,
 } from './serialize.js';
+import { ratingsFor, ratingSummary } from '../reviews/service.js';
 
 const sec = [{ apiKey: [], studentRm: [] }];
 
@@ -99,13 +100,23 @@ export async function catalogRoutes(app: FastifyInstance) {
         include: { brand: true, variants: true, images: { where: { variantId: null } } },
       }),
     ]);
-    return { data: products.map(serializeProductSummary), page: q.page, pageSize: q.pageSize, total };
+    // Uma consulta agregada para a página inteira (evita N+1 por produto).
+    const ratings = await ratingsFor(products.map((p) => p.id));
+    return {
+      data: products.map((p) => serializeProductSummary(p, ratings.get(p.id))),
+      page: q.page, pageSize: q.pageSize, total,
+    };
   });
 
   app.get('/products/:id', {
     schema: { tags: ['Catálogo'], summary: 'Detalha um produto', security: sec,
       params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } } },
-  }, async (req) => serializeProduct(await getProductForCaller(req.group!.id, (req.params as any).id, isCustomerView(req))));
+  }, async (req) => {
+    const id = (req.params as any).id;
+    const product = await getProductForCaller(req.group!.id, id, isCustomerView(req));
+    const rating = await ratingSummary(product.id);
+    return serializeProduct(product, rating);
+  });
 
   app.post('/products', {
     schema: {
