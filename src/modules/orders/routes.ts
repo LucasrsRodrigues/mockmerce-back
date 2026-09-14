@@ -87,6 +87,14 @@ export async function orderRoutes(app: FastifyInstance) {
       },
       response: { 201: orderSchema },
     },
+    // POST sem corpo é o uso normal deste endpoint (checkout simples), e é
+    // assim que os apps já chamam. O schema de body acima existe só para
+    // documentar o pickupPointId — sem este hook ele reprovaria quem não manda
+    // corpo nenhum, quebrando todo mundo que já estava integrado.
+    preValidation: (req, _reply, done) => {
+      if (req.body === undefined || req.body === null) req.body = {};
+      done();
+    },
   }, async (req, reply) => {
     const groupId = req.group!.id;
     const customerId = req.customer!.id;
