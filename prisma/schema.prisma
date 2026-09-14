@@ -68,6 +68,7 @@ model Group {
   apiKeys          ApiKey[]
   mediaAssets      MediaAsset[]
   reviews          Review[]
+  pickupPoints     PickupPoint[]
 
   @@index([apiKeyPrefix])
 }
@@ -355,6 +356,35 @@ model MediaAsset {
   @@index([groupId, kind])
 }
 
+/// Ponto de retirada da loja (f6-locations): a loja cadastra onde o cliente pode
+/// buscar o pedido em vez de receber em casa. A coordenada é obrigatória — sem
+/// ela o ponto não aparece no mapa nem entra no cálculo de distância.
+model PickupPoint {
+  id         String   @id @default(cuid())
+  group      Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  name       String
+  cep        String?
+  street     String?
+  number     String?
+  complement String?
+  district   String?
+  city       String?
+  state      String?
+  latitude   Float
+  longitude  Float
+  /// Texto livre de funcionamento (ex.: "Seg a Sex, 9h às 18h").
+  hours      String?
+  /// Desativado some da vitrine, mas os pedidos antigos continuam apontando.
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  orders Order[]
+
+  @@index([groupId, active])
+}
+
 /// Avaliação de um produto pelo CLIENTE FINAL (f5-reviews): nota, comentário e
 /// fotos. Só quem comprou avalia — a compra é comprovada pelo `order`, e o
 /// vínculo fica guardado para a vitrine poder exibir o selo "compra verificada".
@@ -512,6 +542,9 @@ model Order {
   internalComments OrderInternalComment[]
   invoice          FakeInvoice?
   reviews          Review[]
+  /// Quando preenchido, o pedido é RETIRADA neste ponto (não tem entrega).
+  pickupPoint      PickupPoint? @relation(fields: [pickupPointId], references: [id], onDelete: SetNull)
+  pickupPointId    String?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 
@@ -744,6 +777,12 @@ model Shipment {
   etaDays      Int
   status       ShipmentStatus @default(CREATED)
   trackingCode String
+  /// Pontas do trajeto, congeladas na criação do envio (a loja pode mudar de
+  /// endereço depois, mas o trajeto deste envio não muda).
+  originLat      Float?
+  originLng      Float?
+  destinationLat Float?
+  destinationLng Float?
   events       TrackingEvent[]
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
@@ -758,6 +797,10 @@ model TrackingEvent {
   shipmentId  String
   status      ShipmentStatus
   description String
+  /// Onde o pedido estava neste evento — é o que o app usa para andar com o pin.
+  /// SIMULADO: interpolado entre a loja e o destino (ver shippingSandbox.ts).
+  latitude    Float?
+  longitude   Float?
   createdAt   DateTime       @default(now())
 
   @@index([shipmentId])
@@ -783,6 +826,11 @@ model Address {
   district      String?
   city          String
   state         String
+  /// Ponto exato no mapa (opcional): o app preenche via GPS ou arrastando o pin.
+  /// Fica separado do CEP de propósito — o CEP localiza a rua, a coordenada
+  /// localiza a porta.
+  latitude      Float?
+  longitude     Float?
   createdAt     DateTime    @default(now())
 
   @@index([customerId])
@@ -965,6 +1013,10 @@ model GroupConfig {
   // Fiscal
   address String?
   cnpj    String?
+  /// Onde a loja fica no mapa. É a ORIGEM do trajeto de entrega e o ponto de
+  /// referência quando o cliente não compartilha a própria localização.
+  latitude  Float?
+  longitude Float?
   updatedAt DateTime @updatedAt
 }
 

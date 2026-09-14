@@ -8,7 +8,7 @@ import { variantLabel } from '../catalog/serialize.js';
 import { ensureWarehouses, ensureBalance, reserveForOrder, releaseForOrder } from '../inventory/service.js';
 import { applyPaymentResult } from '../payments/orderPayment.js';
 import { recordOrderEvent } from './stateMachine.js';
-import { conflict, notFound, unprocessable } from '../../lib/errors.js';
+import { conflict, notFound, unprocessable, badRequest } from '../../lib/errors.js';
 
 const orderSchema = {
   type: 'object',
@@ -27,14 +27,37 @@ const orderSchema = {
       },
     },
     payment: { type: 'object', nullable: true, properties: { status: { type: 'string' }, method: { type: 'string' }, amount: { type: 'number' }, transactionId: { type: 'string' } } },
+    // Retirada na loja (f6-locations). Null = entrega no endereço.
+    pickup: {
+      type: 'object', nullable: true, additionalProperties: true,
+      properties: {
+        id: { type: 'string' }, name: { type: 'string' }, hours: { type: 'string', nullable: true },
+        coordinate: { type: 'object', properties: { latitude: { type: 'number' }, longitude: { type: 'number' } } },
+        address: { type: 'object', additionalProperties: true },
+      },
+    },
     createdAt: { type: 'string' },
   },
 };
 
 async function serializeOrder(orderId: string) {
-  const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: { items: true, payment: true } });
+  const order = await prisma.order.findUniqueOrThrow({
+    where: { id: orderId },
+    include: { items: true, payment: true, pickupPoint: true },
+  });
   return {
     id: order.id, status: order.status, total: money(order.total),
+    /// Null = entrega no endereço; preenchido = o cliente retira neste ponto.
+    pickup: order.pickupPoint ? {
+      id: order.pickupPoint.id,
+      name: order.pickupPoint.name,
+      hours: order.pickupPoint.hours,
+      coordinate: { latitude: order.pickupPoint.latitude, longitude: order.pickupPoint.longitude },
+      address: {
+        cep: order.pickupPoint.cep, street: order.pickupPoint.street, number: order.pickupPoint.number,
+        district: order.pickupPoint.district, city: order.pickupPoint.city, state: order.pickupPoint.state,
+      },
+    } : null,
     items: order.items.map((it) => {
       const unitPrice = money(it.unitPrice);
       return { variantId: it.variantId, productName: it.productName, variantName: it.variantName, sku: it.variantSku, unitPrice, quantity: it.quantity, subtotal: Number((unitPrice * it.quantity).toFixed(2)) };
@@ -50,11 +73,33 @@ export async function orderRoutes(app: FastifyInstance) {
 
   // -------------------------------------------------------------- CHECKOUT
   app.post('/orders/checkout', {
-    schema: { tags: ['Pedidos'], summary: 'Cria um pedido a partir do carrinho ativo e RESERVA o estoque (PENDING)', security: [{ apiKey: [], customerToken: [] }], response: { 201: orderSchema } },
+    schema: {
+      tags: ['Pedidos'], summary: 'Cria um pedido a partir do carrinho ativo e RESERVA o estoque (PENDING)',
+      security: [{ apiKey: [], customerToken: [] }],
+      body: {
+        type: 'object',
+        properties: {
+          pickupPointId: {
+            type: 'string',
+            description: 'Retirar neste ponto em vez de receber em casa (ver GET /pickup-points).',
+          },
+        },
+      },
+      response: { 201: orderSchema },
+    },
   }, async (req, reply) => {
     const groupId = req.group!.id;
     const customerId = req.customer!.id;
     const rm = req.rm ?? null;
+
+    // Retirada na loja (f6-locations): o ponto precisa ser desta loja e estar ativo.
+    const pickupPointId = (req.body as { pickupPointId?: string } | undefined)?.pickupPointId;
+    if (pickupPointId) {
+      const ponto = await prisma.pickupPoint.findFirst({
+        where: tenantScope(groupId, { id: pickupPointId, active: true }), select: { id: true },
+      });
+      if (!ponto) throw badRequest('Ponto de retirada não encontrado ou desativado.');
+    }
 
     const cart = await prisma.cart.findFirst({
       where: { customerId, status: 'ACTIVE' },
@@ -72,6 +117,7 @@ export async function orderRoutes(app: FastifyInstance) {
       const created = await tx.order.create({
         data: {
           groupId, customerId, status: 'PENDING', total: Number(total.toFixed(2)),
+          pickupPointId: pickupPointId ?? null,
           items: {
             create: cart.items.map((it) => ({
               variantId: it.variantId, productName: it.variant.product.name, variantSku: it.variant.sku,

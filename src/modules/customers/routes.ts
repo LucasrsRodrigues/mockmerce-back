@@ -1,6 +1,7 @@
 import { randomInt } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../../prisma.js';
+import { parseCoords } from '../../lib/geo.js';
 import { hashPassword, verifyPassword, signCustomerToken } from '../../lib/security.js';
 import { tenantScope } from '../../lib/tenantScope.js';
 import { isValidDocument, normalizeDocument } from '../../lib/document.js';
@@ -14,6 +15,24 @@ const customerSchema = {
     email: { type: 'string' },
   },
 };
+
+/** Endereço com o ponto no formato que o mapa do app consome. */
+function serializeAddress(a: {
+  id: string; type: string; isDefault: boolean; recipientName: string | null;
+  cep: string; street: string; number: string; complement: string | null;
+  district: string | null; city: string; state: string;
+  latitude: number | null; longitude: number | null; createdAt: Date;
+}) {
+  return {
+    id: a.id, type: a.type, isDefault: a.isDefault, recipientName: a.recipientName,
+    cep: a.cep, street: a.street, number: a.number, complement: a.complement,
+    district: a.district, city: a.city, state: a.state,
+    coordinate: a.latitude !== null && a.longitude !== null
+      ? { latitude: a.latitude, longitude: a.longitude }
+      : null,
+    createdAt: a.createdAt.toISOString(),
+  };
+}
 
 export async function customerRoutes(app: FastifyInstance) {
   // Exigem a API key do grupo (o cadastro/login acontece DENTRO de um grupo).
@@ -203,6 +222,10 @@ export async function customerRoutes(app: FastifyInstance) {
 
   // =====================================================================
   // ENDEREÇOS (do cliente logado)
+  //
+  // O endereço pode ter um PONTO no mapa (latitude/longitude), preenchido pelo
+  // app via GPS. O `coordinate` na resposta já sai no formato que o
+  // react-native-maps consome; null quando o cliente nunca marcou no mapa.
   // =====================================================================
   const custSec = [{ apiKey: [], customerToken: [] }];
   const addressBody = {
@@ -212,18 +235,44 @@ export async function customerRoutes(app: FastifyInstance) {
       isDefault: { type: 'boolean' }, recipientName: { type: 'string' },
       cep: { type: 'string' }, street: { type: 'string' }, number: { type: 'string' },
       complement: { type: 'string' }, district: { type: 'string' }, city: { type: 'string' }, state: { type: 'string', minLength: 2, maxLength: 2 },
+      // Ponto no mapa (f6-locations). Opcional: o app manda quando o cliente
+      // usa o GPS ou arrasta o pin; sem isso o endereço vale como sempre valeu.
+      latitude: { type: 'number', minimum: -90, maximum: 90, nullable: true },
+      longitude: { type: 'number', minimum: -180, maximum: 180, nullable: true },
     },
   };
 
   app.get('/customers/me/addresses', { schema: { tags: ['Cliente'], summary: 'Lista os endereços', security: custSec }, preHandler: app.requireCustomer },
-    async (req) => prisma.address.findMany({ where: { customerId: req.customer!.id }, orderBy: { createdAt: 'asc' } }));
+    async (req) => (await prisma.address.findMany({ where: { customerId: req.customer!.id }, orderBy: { createdAt: 'asc' } })).map(serializeAddress));
+
+  // Atualiza o endereço — na prática, o que o app mais manda aqui é a
+  // coordenada, depois que o cliente arrasta o pin no mapa.
+  app.patch('/customers/me/addresses/:id', {
+    schema: {
+      tags: ['Cliente'], summary: 'Atualiza um endereço (inclusive o ponto no mapa)', security: custSec,
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+      body: { type: 'object', properties: addressBody.properties },
+    },
+    preHandler: app.requireCustomer,
+  }, async (req) => {
+    const b = req.body as any;
+    const atual = await prisma.address.findFirst({ where: { id: (req.params as any).id, customerId: req.customer!.id }, select: { id: true, type: true } });
+    if (!atual) throw notFound('Endereço não encontrado.');
+    const coords = parseCoords(b.latitude, b.longitude);
+    if (b.isDefault) await prisma.address.updateMany({ where: { customerId: req.customer!.id, type: b.type ?? atual.type }, data: { isDefault: false } });
+    const campos = ['type', 'isDefault', 'recipientName', 'cep', 'street', 'number', 'complement', 'district', 'city', 'state'] as const;
+    const data: Record<string, unknown> = {};
+    for (const c of campos) if (b[c] !== undefined) data[c] = b[c];
+    return serializeAddress(await prisma.address.update({ where: { id: atual.id }, data: { ...data, ...(coords ?? {}) } }));
+  });
 
   app.post('/customers/me/addresses', { schema: { tags: ['Cliente'], summary: 'Adiciona um endereço', security: custSec, body: addressBody }, preHandler: app.requireCustomer },
     async (req, reply) => {
       const b = req.body as any;
       if (b.isDefault) await prisma.address.updateMany({ where: { customerId: req.customer!.id, type: b.type ?? 'SHIPPING' }, data: { isDefault: false } });
-      const addr = await prisma.address.create({ data: { groupId: req.group!.id, customerId: req.customer!.id, type: b.type ?? 'SHIPPING', isDefault: b.isDefault ?? false, recipientName: b.recipientName, cep: b.cep, street: b.street, number: b.number, complement: b.complement, district: b.district, city: b.city, state: b.state } });
-      return reply.code(201).send(addr);
+      const coords = parseCoords(b.latitude, b.longitude);
+      const addr = await prisma.address.create({ data: { groupId: req.group!.id, customerId: req.customer!.id, type: b.type ?? 'SHIPPING', isDefault: b.isDefault ?? false, recipientName: b.recipientName, cep: b.cep, street: b.street, number: b.number, complement: b.complement, district: b.district, city: b.city, state: b.state, ...(coords ?? {}) } });
+      return reply.code(201).send(serializeAddress(addr));
     });
 
   app.delete('/customers/me/addresses/:id', { schema: { tags: ['Cliente'], summary: 'Remove um endereço', security: custSec, params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } } }, preHandler: app.requireCustomer },

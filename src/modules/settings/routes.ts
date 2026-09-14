@@ -15,6 +15,7 @@ const CONFIG_SELECT = {
   storeName: true, storeDescription: true, logoUrl: true,
   supportEmail: true, whatsapp: true, instagram: true,
   primaryColor: true, address: true, cnpj: true,
+  latitude: true, longitude: true,
 } as const;
 
 const CONFIG_BODY_PROPS = {
@@ -22,6 +23,10 @@ const CONFIG_BODY_PROPS = {
   storeName: { type: 'string', nullable: true }, storeDescription: { type: 'string', nullable: true }, logoUrl: { type: 'string', nullable: true },
   supportEmail: { type: 'string', nullable: true }, whatsapp: { type: 'string', nullable: true }, instagram: { type: 'string', nullable: true },
   primaryColor: { type: 'string', nullable: true }, address: { type: 'string', nullable: true }, cnpj: { type: 'string', nullable: true },
+  // Onde a loja fica no mapa (f6-locations): origem do trajeto de entrega e
+  // referência de distância quando o cliente não compartilha a localização.
+  latitude: { type: 'number', minimum: -90, maximum: 90, nullable: true },
+  longitude: { type: 'number', minimum: -180, maximum: 180, nullable: true },
 } as const;
 
 const CONFIG_KEYS = Object.keys(CONFIG_SELECT) as (keyof typeof CONFIG_SELECT)[];

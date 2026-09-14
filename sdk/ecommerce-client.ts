@@ -91,6 +91,44 @@ export interface CanReview {
   reviewId: string | null;
 }
 
+/** Endereço do cliente, com o ponto no mapa quando ele marcou. */
+export interface CustomerAddress {
+  id: string;
+  type: string;
+  isDefault: boolean;
+  recipientName: string | null;
+  cep: string; street: string; number: string;
+  complement: string | null; district: string | null; city: string; state: string;
+  /** null quando o cliente nunca marcou o endereço no mapa. */
+  coordinate: Coordinate | null;
+  createdAt: string;
+}
+
+/** Coordenada no formato que o react-native-maps consome direto. */
+export interface Coordinate { latitude: number; longitude: number }
+
+/** Ponto de retirada da loja. */
+export interface PickupPoint {
+  id: string;
+  name: string;
+  address: { cep: string | null; street: string | null; number: string | null; complement: string | null; district: string | null; city: string | null; state: string | null };
+  coordinate: Coordinate;
+  hours: string | null;
+  active: boolean;
+  /** Distância em km a partir da posição enviada na busca; null sem posição. */
+  distanceKm: number | null;
+}
+
+/** Tudo que o app precisa para desenhar o mapa do rastreio. */
+export interface Tracking {
+  origin: Coordinate | null;
+  destination: Coordinate | null;
+  /** Onde o pin está agora. */
+  current: Coordinate | null;
+  /** Pontos por onde passou — use na <Polyline coordinates={path} />. */
+  path: Coordinate[];
+}
+
 export interface ReviewInput {
   rating: number;
   title?: string | null;
@@ -195,7 +233,9 @@ export interface ShippingQuote {
 export interface Shipment {
   id: string; orderId: string; service: string; cost: number; etaDays: number;
   status: string; trackingCode: string;
-  events: { status: string; description: string; at: string }[]; createdAt: string;
+  events: { status: string; description: string; coordinate: Coordinate | null; at: string }[]; createdAt: string;
+  /** Mapa do rastreio: pontas, posição atual e a rota para a Polyline. */
+  tracking: Tracking;
 }
 
 export interface SalesReport {
@@ -223,6 +263,12 @@ export interface Order {
   total: number;
   items: OrderItem[];
   payment: { status: string; method: string; amount: number; transactionId: string } | null;
+  /** Preenchido quando o pedido é RETIRADA; null quando é entrega. */
+  pickup: {
+    id: string; name: string; hours: string | null;
+    coordinate: Coordinate;
+    address: { cep: string | null; street: string | null; number: string | null; district: string | null; city: string | null; state: string | null };
+  } | null;
   createdAt: string;
 }
 
@@ -365,6 +411,27 @@ export class EcommerceClient {
     /** Sobe o arquivo E já vincula ao produto, numa chamada só. */
     addMedia: (id: string, file: UploadInput, opts: { variantId?: string; isPrimary?: boolean; position?: number } = {}) =>
       this.upload<ProductImage & { media: MediaAsset }>(`/products/${id}/media`, file, opts),
+  };
+
+  // ------------------------------------------------------------- Localização
+  locations = {
+    /**
+     * Pontos de retirada ativos. Passe a posição do cliente para receber a
+     * lista ordenada por proximidade, com `distanceKm` em cada ponto.
+     */
+    pickupPoints: (params: { latitude?: number; longitude?: number; maxKm?: number } = {}) =>
+      this.request<{ data: PickupPoint[]; origin: Coordinate | null }>('GET', `/pickup-points${this.qs(params)}`),
+    /** LOJA: todos os pontos, inclusive inativos. */
+    storePickupPoints: () => this.request<{ data: PickupPoint[] }>('GET', '/store/pickup-points'),
+    /** LOJA: cadastra um ponto (latitude e longitude são obrigatórias). */
+    createPickupPoint: (data: {
+      name: string; latitude: number; longitude: number;
+      cep?: string; street?: string; number?: string; complement?: string;
+      district?: string; city?: string; state?: string; hours?: string; active?: boolean;
+    }) => this.request<PickupPoint>('POST', '/store/pickup-points', data),
+    updatePickupPoint: (id: string, data: Partial<Parameters<EcommerceClient['locations']['createPickupPoint']>[0]>) =>
+      this.request<PickupPoint>('PATCH', `/store/pickup-points/${id}`, data),
+    removePickupPoint: (id: string) => this.request<void>('DELETE', `/store/pickup-points/${id}`),
   };
 
   // ------------------------------------------------------------- Avaliações
@@ -515,7 +582,7 @@ export class EcommerceClient {
       quote: (data: { cepDestino: string; orderId?: string; items?: { weightGr: number; quantity: number }[] }) =>
         this.request<ShippingQuote>('POST', '/sandbox/shipping/quote', data),
       /** Despacha um pedido: cria envio + rastreamento. */
-      createShipment: (data: { orderId: string; service: 'PAC' | 'SEDEX' | 'TRANSPORTADORA' | 'RETIRADA_LOJA'; cepDestino: string }) =>
+      createShipment: (data: { orderId: string; service: 'PAC' | 'SEDEX' | 'TRANSPORTADORA' | 'RETIRADA_LOJA'; cepDestino: string; latitude?: number; longitude?: number }) =>
         this.request<Shipment>('POST', '/sandbox/shipments', data),
       getShipment: (id: string) => this.request<Shipment>('GET', `/sandbox/shipments/${id}`),
       /** Avança o rastreamento → dispara webhook shipment.updated. */
@@ -545,7 +612,8 @@ export class EcommerceClient {
 
   // -------------------------------------------------------------------- Pedidos
   orders = {
-    checkout: () => this.request<Order>('POST', '/orders/checkout'),
+    /** `pickupPointId` troca a entrega por retirada naquele ponto. */
+    checkout: (data: { pickupPointId?: string } = {}) => this.request<Order>('POST', '/orders/checkout', data),
     list: () => this.request<Order[]>('GET', '/orders'),
     get: (id: string) => this.request<Order>('GET', `/orders/${id}`),
     pay: (id: string, data: { method: PaymentMethod; simulate?: 'approve' | 'decline' }) =>
@@ -560,9 +628,13 @@ export class EcommerceClient {
   // ---------------------------------------------- Perfil do cliente (endereços/favoritos)
   profile = {
     addresses: {
-      list: () => this.request('GET', '/customers/me/addresses'),
-      add: (data: { cep: string; street: string; number: string; city: string; state: string; type?: 'SHIPPING' | 'BILLING'; isDefault?: boolean; recipientName?: string; complement?: string; district?: string }) =>
-        this.request('POST', '/customers/me/addresses', data),
+      list: () => this.request<CustomerAddress[]>('GET', '/customers/me/addresses'),
+      /** `latitude`/`longitude` são opcionais: mande quando o cliente marcar no mapa. */
+      add: (data: { cep: string; street: string; number: string; city: string; state: string; type?: 'SHIPPING' | 'BILLING'; isDefault?: boolean; recipientName?: string; complement?: string; district?: string; latitude?: number; longitude?: number }) =>
+        this.request<CustomerAddress>('POST', '/customers/me/addresses', data),
+      /** Atualiza o endereço — inclusive só o ponto, depois de arrastar o pin. */
+      update: (id: string, data: Partial<{ cep: string; street: string; number: string; city: string; state: string; isDefault: boolean; recipientName: string; complement: string; district: string; latitude: number; longitude: number }>) =>
+        this.request<CustomerAddress>('PATCH', `/customers/me/addresses/${id}`, data),
       remove: (id: string) => this.request<void>('DELETE', `/customers/me/addresses/${id}`),
     },
     favorites: {

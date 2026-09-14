@@ -14,6 +14,7 @@ import { setErrorHandler } from './plugins/errorHandler.js';
 import { catalogRoutes } from './modules/catalog/routes.js';
 import { mediaRoutes } from './modules/media/routes.js';
 import { reviewRoutes } from './modules/reviews/routes.js';
+import { locationRoutes } from './modules/locations/routes.js';
 import { inventoryRoutes } from './modules/inventory/routes.js';
 import { webhookRoutes } from './modules/webhooks/routes.js';
 import { sandboxRoutes } from './modules/payments/routes.js';
@@ -123,6 +124,7 @@ export async function buildApp() {
     await v1.register(catalogRoutes);
     await v1.register(mediaRoutes);
     await v1.register(reviewRoutes);
+    await v1.register(locationRoutes);
     await v1.register(inventoryRoutes);
     await v1.register(webhookRoutes);
     await v1.register(sandboxRoutes);

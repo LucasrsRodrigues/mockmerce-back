@@ -3,6 +3,8 @@ import type { ShipmentStatus } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { tenantScope } from '../../lib/tenantScope.js';
 import { emitEvent } from '../../lib/outbox.js';
+import { DEFAULT_ORIGIN, interpolate, parseCoords, type Coords } from '../../lib/geo.js';
+import { storeOrigin } from '../locations/routes.js';
 import { money } from '../../lib/serialize.js';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
 
@@ -58,29 +60,74 @@ const DESC: Record<ShipmentStatus, string> = {
 };
 
 function serializeShipment(s: any) {
+  const coord = (lat: number | null, lng: number | null) =>
+    lat !== null && lat !== undefined && lng !== null && lng !== undefined ? { latitude: lat, longitude: lng } : null;
+
+  const events = (s.events ?? []).map((e: any) => ({
+    status: e.status, description: e.description,
+    coordinate: coord(e.latitude, e.longitude),
+    at: e.createdAt.toISOString(),
+  }));
+
   return {
     id: s.id, orderId: s.orderId, service: s.service, cost: money(s.cost), etaDays: s.etaDays,
     status: s.status, trackingCode: s.trackingCode,
-    events: (s.events ?? []).map((e: any) => ({ status: e.status, description: e.description, at: e.createdAt.toISOString() })),
+    events,
+    /// Tudo que o app precisa para desenhar o mapa do rastreio:
+    ///   origin/destination → as pontas (e a região a enquadrar);
+    ///   current            → onde o pin está agora;
+    ///   path               → os pontos por onde passou, para a Polyline.
+    tracking: {
+      origin: coord(s.originLat, s.originLng),
+      destination: coord(s.destinationLat, s.destinationLng),
+      current: [...events].reverse().find((e: any) => e.coordinate)?.coordinate ?? null,
+      path: events.filter((e: any) => e.coordinate).map((e: any) => e.coordinate),
+    },
     createdAt: s.createdAt.toISOString(),
   };
 }
 
-export async function createShipment(groupId: string, input: { orderId: string; service: string; cepDestino: string }) {
+export async function createShipment(groupId: string, input: { orderId: string; service: string; cepDestino: string; latitude?: number; longitude?: number }) {
   const quote = await quoteForRequest(groupId, { cepDestino: input.cepDestino, orderId: input.orderId });
   const option = quote.options.find((o) => o.service === input.service);
   if (!option) throw badRequest(`Serviço inválido. Opções: ${quote.options.map((o) => o.service).join(', ')}.`);
+
+  // Pontas do trajeto (f6-locations), congeladas aqui:
+  //   origem  = a loja (GroupConfig) ou o centro de SP, como no cálculo do frete;
+  //   destino = o que o app mandou ou, na falta, o endereço padrão do cliente.
+  const origem = (await storeOrigin(groupId)) ?? DEFAULT_ORIGIN;
+  const destino = parseCoords(input.latitude, input.longitude) ?? (await destinoDoPedido(groupId, input.orderId));
 
   const trackingCode = `BR${randomBytes(5).toString('hex').toUpperCase()}BR`;
   const shipment = await prisma.shipment.create({
     data: {
       groupId, orderId: input.orderId, service: input.service, cost: option.price, etaDays: option.etaDays,
       status: 'CREATED', trackingCode,
-      events: { create: [{ status: 'CREATED', description: DESC.CREATED }] },
+      originLat: origem.latitude, originLng: origem.longitude,
+      destinationLat: destino?.latitude ?? null, destinationLng: destino?.longitude ?? null,
+      events: {
+        create: [{
+          status: 'CREATED', description: DESC.CREATED,
+          latitude: origem.latitude, longitude: origem.longitude,
+        }],
+      },
     },
     include: { events: { orderBy: { createdAt: 'asc' } } },
   });
   return serializeShipment(shipment);
+}
+
+/** Coordenada do endereço padrão de quem fez o pedido (quando ele marcou no mapa). */
+async function destinoDoPedido(groupId: string, orderId: string): Promise<Coords | null> {
+  const order = await prisma.order.findFirst({ where: tenantScope(groupId, { id: orderId }), select: { customerId: true } });
+  if (!order) return null;
+  const addr = await prisma.address.findFirst({
+    where: { customerId: order.customerId, type: 'SHIPPING', latitude: { not: null }, longitude: { not: null } },
+    orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
+    select: { latitude: true, longitude: true },
+  });
+  if (!addr?.latitude || !addr?.longitude) return null;
+  return { latitude: addr.latitude, longitude: addr.longitude };
 }
 
 export async function getShipment(groupId: string, id: string) {
@@ -90,6 +137,28 @@ export async function getShipment(groupId: string, id: string) {
 }
 
 /** Avança o rastreamento para o próximo estado e emite shipment.updated. */
+/**
+ * Quanto do caminho já foi andado em cada status. É o que faz o pin do app se
+ * mexer: SIMULADO, interpolando em linha reta entre a loja e o destino.
+ */
+const PROGRESSO: Record<string, number> = {
+  CREATED: 0,
+  POSTED: 0.1,
+  IN_TRANSIT: 0.55,
+  OUT_FOR_DELIVERY: 0.9,
+  DELIVERED: 1,
+};
+
+/** Onde o pedido está quando o envio chega a determinado status. */
+function posicaoNoStatus(s: { originLat: number | null; originLng: number | null; destinationLat: number | null; destinationLng: number | null }, status: string): Coords | null {
+  if (s.originLat === null || s.originLng === null || s.destinationLat === null || s.destinationLng === null) return null;
+  return interpolate(
+    { latitude: s.originLat, longitude: s.originLng },
+    { latitude: s.destinationLat, longitude: s.destinationLng },
+    PROGRESSO[status] ?? 0,
+  );
+}
+
 export async function advanceShipment(groupId: string, id: string) {
   const s = await prisma.shipment.findFirst({ where: tenantScope(groupId, { id }) });
   if (!s) throw notFound('Envio não encontrado.');
@@ -97,9 +166,13 @@ export async function advanceShipment(groupId: string, id: string) {
   if (idx >= FLOW.length - 1) throw conflict('Envio já foi entregue.');
   const next = FLOW[idx + 1];
 
+  const posicao = posicaoNoStatus(s, next);
+
   await prisma.$transaction(async (tx) => {
     await tx.shipment.update({ where: { id }, data: { status: next } });
-    await tx.trackingEvent.create({ data: { shipmentId: id, status: next, description: DESC[next] } });
+    await tx.trackingEvent.create({
+      data: { shipmentId: id, status: next, description: DESC[next], latitude: posicao?.latitude, longitude: posicao?.longitude },
+    });
     await emitEvent(tx, groupId, 'shipment.updated', { shipmentId: id, orderId: s.orderId, status: next, trackingCode: s.trackingCode });
   });
 

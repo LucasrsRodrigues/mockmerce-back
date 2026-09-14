@@ -70,7 +70,18 @@ export async function sandboxRoutes(app: FastifyInstance) {
   app.post('/sandbox/shipments', {
     schema: {
       tags: ['Sandbox'], summary: '[FAKE] Despacha um pedido (cria envio + rastreamento)', security: sec,
-      body: { type: 'object', required: ['orderId', 'service', 'cepDestino'], properties: { orderId: { type: 'string' }, service: { type: 'string', enum: ['PAC', 'SEDEX', 'TRANSPORTADORA', 'RETIRADA_LOJA'] }, cepDestino: { type: 'string' } } },
+      body: {
+        type: 'object', required: ['orderId', 'service', 'cepDestino'],
+        properties: {
+          orderId: { type: 'string' },
+          service: { type: 'string', enum: ['PAC', 'SEDEX', 'TRANSPORTADORA', 'RETIRADA_LOJA'] },
+          cepDestino: { type: 'string' },
+          // Destino do trajeto no mapa. Sem isto, usa o endereço padrão do
+          // cliente (quando ele marcou o ponto no mapa).
+          latitude: { type: 'number', minimum: -90, maximum: 90 },
+          longitude: { type: 'number', minimum: -180, maximum: 180 },
+        },
+      },
     },
   }, async (req, reply) => reply.code(201).send(await createShipment(req.group!.id, req.body as any)));
 
