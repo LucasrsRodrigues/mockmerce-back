@@ -245,4 +245,110 @@ export async function adminInspectRoutes(app: FastifyInstance) {
       };
     });
   });
+
+  // -------------------------------------------------------------------- PUSH
+  /**
+   * "Quem está pronto para a aula de notificações?"
+   *
+   * Uma linha por grupo, com as três coisas que decidem se o push daquele
+   * grupo funciona: se registrou a credencial do Firebase, se o Google
+   * aceitou, e se algum aparelho chegou a se registrar. Grupo sem aparelho
+   * não é erro — é alguém que ainda não instalou o development build.
+   */
+  app.get('/admin/push/readiness', {
+    preHandler: read,
+    schema: {
+      tags: ['Admin'],
+      summary: 'Prontidão de push da turma inteira (credencial, aparelhos, envios)',
+      security: adminSec,
+    },
+  }, async () => {
+    const [grupos, configs, aparelhos, envios] = await Promise.all([
+      prisma.group.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      prisma.groupPushConfig.findMany({ select: { groupId: true, projectId: true, lastCheckOk: true, lastCheckAt: true, lastCheckMsg: true } }),
+      prisma.deviceToken.groupBy({ by: ['groupId', 'active'], _count: { _all: true } }),
+      prisma.pushMessage.groupBy({ by: ['groupId', 'status'], _count: { _all: true }, _max: { createdAt: true } }),
+    ]);
+
+    const porGrupo = new Map(configs.map((c) => [c.groupId, c]));
+
+    return grupos.map((g) => {
+      const cfg = porGrupo.get(g.id);
+      const ativos = aparelhos.find((a) => a.groupId === g.id && a.active)?._count._all ?? 0;
+      const inativos = aparelhos.find((a) => a.groupId === g.id && !a.active)?._count._all ?? 0;
+      const meus = envios.filter((e) => e.groupId === g.id);
+      const porStatus = Object.fromEntries(meus.map((e) => [e.status, e._count._all]));
+      const ultimoEnvio = meus.reduce<Date | null>((maior, e) => {
+        const d = e._max.createdAt;
+        return d && (!maior || d > maior) ? d : maior;
+      }, null);
+
+      return {
+        groupId: g.id,
+        name: g.name,
+        credencial: cfg
+          ? { projectId: cfg.projectId, ok: cfg.lastCheckOk, verificadaEm: cfg.lastCheckAt?.toISOString() ?? null, mensagem: cfg.lastCheckMsg }
+          : null,
+        aparelhos: { ativos, inativos },
+        envios: { total: meus.reduce((t, e) => t + e._count._all, 0), porStatus, ultimoEm: ultimoEnvio?.toISOString() ?? null },
+        /**
+         * O semáforo que o painel do professor pinta. `pronto` exige os dois
+         * lados: credencial aceita pelo Google E um aparelho registrado — ter
+         * só um dos dois não entrega notificação nenhuma.
+         */
+        estado: !cfg ? 'sem-credencial'
+          : cfg.lastCheckOk === false ? 'credencial-recusada'
+          : ativos === 0 ? 'sem-aparelho'
+          : 'pronto',
+      };
+    });
+  });
+
+  /** Detalhe de um grupo: credencial, aparelhos e os últimos envios. */
+  app.get('/admin/groups/:id/push', {
+    preHandler: read,
+    schema: {
+      tags: ['Admin'],
+      summary: 'Push de um grupo (sem expor a chave privada)',
+      security: adminSec,
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+    },
+  }, async (req) => {
+    const group = await loadGroup(req);
+
+    const [config, devices, messages] = await Promise.all([
+      prisma.groupPushConfig.findUnique({
+        where: { groupId: group.id },
+        // A chave privada (mesmo cifrada) NUNCA sai daqui.
+        select: { projectId: true, clientEmail: true, lastCheckOk: true, lastCheckAt: true, lastCheckMsg: true, updatedAt: true },
+      }),
+      prisma.deviceToken.findMany({
+        where: { groupId: group.id },
+        orderBy: { lastSeenAt: 'desc' },
+        select: { id: true, platform: true, deviceName: true, appVersion: true, active: true, disabledReason: true, lastSeenAt: true, customerId: true },
+      }),
+      prisma.pushMessage.findMany({
+        where: { groupId: group.id },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        select: { id: true, title: true, kind: true, status: true, reason: true, errorCode: true, errorDetail: true, createdAt: true },
+      }),
+    ]);
+
+    return {
+      group,
+      credencial: config
+        ? {
+            projectId: config.projectId,
+            clientEmail: config.clientEmail,
+            ok: config.lastCheckOk,
+            verificadaEm: config.lastCheckAt?.toISOString() ?? null,
+            mensagem: config.lastCheckMsg,
+            atualizadaEm: config.updatedAt.toISOString(),
+          }
+        : null,
+      aparelhos: devices.map((d) => ({ ...d, lastSeenAt: d.lastSeenAt.toISOString() })),
+      envios: messages.map((m) => ({ ...m, createdAt: m.createdAt.toISOString() })),
+    };
+  });
 }
