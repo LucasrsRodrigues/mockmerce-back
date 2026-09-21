@@ -61,6 +61,30 @@ const schema = z.object({
   UPLOAD_MAX_MB: z.coerce.number().int().positive().default(50),
   /// Cota total de storage POR GRUPO, em MB (anti noisy neighbor no bucket comum).
   UPLOAD_QUOTA_MB_PER_GROUP: z.coerce.number().int().positive().default(500),
+
+  // ---- Push (Firebase Cloud Messaging HTTP v1) ----
+  /// As credenciais são de UMA service account do Firebase, com o papel
+  /// "Firebase Cloud Messaging API Admin". Duas formas de fornecer — use uma:
+  ///
+  ///   1. FCM_SERVICE_ACCOUNT_JSON = o JSON baixado do Console, inteiro, em
+  ///      base64 (`base64 -i chave.json`). É a forma prática em Docker/Render:
+  ///      uma variável só, sem quebra de linha para escapar.
+  ///   2. FCM_PROJECT_ID + FCM_CLIENT_EMAIL + FCM_PRIVATE_KEY (os três campos
+  ///      soltos; no private key os \n literais são convertidos em quebras).
+  ///
+  /// Sem credencial a API inteira continua de pé e só as rotas de push
+  /// respondem 503 PUSH_DISABLED — mesmo contrato do upload sem S3_BUCKET.
+  FCM_SERVICE_ACCOUNT_JSON: blankAsUndefined(z.string().optional()) as z.ZodType<string | undefined>,
+  FCM_PROJECT_ID: blankAsUndefined(z.string().optional()) as z.ZodType<string | undefined>,
+  FCM_CLIENT_EMAIL: blankAsUndefined(z.string().optional()) as z.ZodType<string | undefined>,
+  FCM_PRIVATE_KEY: blankAsUndefined(z.string().optional()) as z.ZodType<string | undefined>,
+  /// Canal padrão no Android quando o envio não especifica um. O canal precisa
+  /// EXISTIR no app (criado com setNotificationChannelAsync) — se não existir,
+  /// o Android entrega no canal default e ignora som/prioridade que você pediu.
+  PUSH_ANDROID_CHANNEL_ID: z.string().default('default'),
+  /// Quantos aparelhos recebem em paralelo num disparo (o FCM v1 não tem
+  /// multicast: é uma requisição HTTP por token).
+  PUSH_CONCURRENCY: z.coerce.number().int().positive().default(8),
 });
 
 const parsed = schema.safeParse(process.env);

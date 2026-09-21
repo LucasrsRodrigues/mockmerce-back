@@ -22,6 +22,7 @@ import { reportRoutes } from './modules/reports/routes.js';
 import { customerRoutes } from './modules/customers/routes.js';
 import { cartRoutes } from './modules/cart/routes.js';
 import { orderRoutes } from './modules/orders/routes.js';
+import { pushRoutes } from './modules/push/routes.js';
 import { storeOrderRoutes } from './modules/orders/storeRoutes.js';
 import { customerStoreRoutes } from './modules/customers/storeRoutes.js';
 import { commsRoutes } from './modules/comms/routes.js';
@@ -127,6 +128,7 @@ export async function buildApp() {
     await v1.register(locationRoutes);
     await v1.register(inventoryRoutes);
     await v1.register(webhookRoutes);
+    await v1.register(pushRoutes);
     await v1.register(sandboxRoutes);
     await v1.register(reportRoutes);
     await v1.register(customerRoutes);

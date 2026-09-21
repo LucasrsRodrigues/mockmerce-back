@@ -144,6 +144,7 @@ Para os alunos (todos exigem `X-API-Key`, ou o token de aluno do painel):
 | Pagamento | `POST /orders/:id/pay` (baixa a reserva) |
 | Estoque | `GET /variants/:id/stock`, `POST .../stock/receive\|adjust`, `GET .../stock/movements` |
 | Webhooks | `GET/POST /webhooks`, `DELETE /webhooks/:id`, `POST /webhooks/:id/ping`, `GET /webhooks/deliveries\|events` |
+| Push (FCM) | `POST/GET/DELETE /customers/me/devices` (app), `POST /push/send\|test`, `GET /push/devices\|messages\|status`, `PUT/GET/DELETE /store/push-config` |
 | Sandbox (fake) | `POST /sandbox/payments` (+`/:id/settle`), `POST /sandbox/shipping/quote`, `POST /sandbox/shipments` (+`/:id/advance`) |
 | Relatórios | `GET /reports/sales\|top-products\|customers\|inventory` (todos com `?format=csv`) |
 | Loja — pedidos | `GET /store/orders`, `POST /store/orders/:id/transition\|refund\|comments` |
@@ -212,6 +213,62 @@ await api.products.addImage(produtoId, { mediaId: media.id, isPrimary: true });
 **Vídeos:** ficam na mesma lista de mídias do produto, separados na resposta —
 `images` traz só imagens (compatível com quem já consumia) e `videos` traz os
 vídeos. A capa (`isPrimary`) é sempre uma imagem.
+
+---
+
+## Push (Firebase Cloud Messaging)
+
+Push **real**, pelo FCM HTTP v1 — não é um mock. Fica desligado por padrão: sem
+credencial, só as rotas de push respondem `503 PUSH_DISABLED` e o resto da API
+funciona normal. Confira com `GET /v1/push/status`.
+
+**Cada loja usa o próprio projeto Firebase.** Um token do FCM pertence ao
+projeto que o emitiu (o mesmo que gerou o `google-services.json` do app), e
+só a credencial DESSE projeto alcança aquele aparelho — enviar com a de outro
+devolve `SENDER_ID_MISMATCH`. Por isso a credencial é por grupo:
+
+| rota | o que faz |
+|---|---|
+| `PUT /v1/store/push-config` | cola o JSON da conta de serviço (cru ou base64); é testado contra o Google na hora |
+| `GET /v1/store/push-config` | projeto, conta e resultado do último teste — a chave privada nunca volta |
+| `POST /v1/store/push-config/check` | refaz o handshake OAuth, sem enviar nada |
+| `DELETE /v1/store/push-config` | remove e volta a usar a do servidor |
+
+A chave privada é guardada **cifrada** (AES-256-GCM, ver `lib/secretBox.ts`) —
+trocar o `JWT_SECRET` invalida as credenciais salvas e os grupos recolam.
+
+**Fallback:** sem credencial da loja, o envio usa a do servidor
+(`FCM_SERVICE_ACCOUNT_JSON` no `.env`) — é a que o professor usa na
+demonstração. `GET /v1/push/status` diz qual das duas está valendo.
+
+**O caminho completo:**
+
+1. o app pede permissão e pega o token do aparelho
+   (`getDevicePushTokenAsync()` — o token CRU do FCM, não o `ExponentPushToken[...]`);
+2. registra em `POST /v1/customers/me/devices` (com o JWT do cliente) a cada
+   abertura — o token é por instalação e rotaciona sozinho;
+3. a loja dispara com `POST /v1/push/send`;
+4. tudo que saiu fica em `GET /v1/push/messages`, com o payload e a resposta do FCM.
+
+**`kind` decide o comportamento nos três estados do app:**
+
+| | app aberto | app em segundo plano | app fechado |
+|---|---|---|---|
+| `NOTIFICATION` | o SO desenha; seu handler recebe | o SO desenha | o SO desenha, seu código só roda no toque |
+| `DATA` | seu handler recebe, você decide | seu handler recebe | entrega não garantida no Android |
+
+**Deep link:** o campo `data` viaja até o app. Mandar
+`{ "rota": "produto", "produtoId": "..." }` é o que permite abrir a tela do
+produto no toque, em vez da home.
+
+**Gatilho automático:** quando o `PATCH /v1/variants/:id` **baixa** o preço,
+quem favoritou aquela variante recebe push (`reason: price_drop`) com o
+`produtoId` no `data`, e um evento `product.price_changed` vai para o Outbox —
+quem preferir webhook recebe pelo caminho de sempre. Preço que sobe não
+notifica ninguém.
+
+> Um push nunca derruba o fluxo que o originou: se o FCM estiver fora, o preço
+> muda do mesmo jeito e a falha fica registrada no inspector.
 
 ---
 

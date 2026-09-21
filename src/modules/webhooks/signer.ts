@@ -22,6 +22,7 @@ export const WEBHOOK_EVENTS = [
   'order.cancelled',
   'order.refunded',
   'product.low_stock',
+  'product.price_changed',
   'payment.approved',
   'payment.declined',
   'shipment.updated',

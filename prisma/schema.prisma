@@ -69,6 +69,9 @@ model Group {
   mediaAssets      MediaAsset[]
   reviews          Review[]
   pickupPoints     PickupPoint[]
+  deviceTokens     DeviceToken[]
+  pushMessages     PushMessage[]
+  pushConfig       GroupPushConfig?
 
   @@index([apiKeyPrefix])
 }
@@ -471,6 +474,7 @@ model Customer {
   segments  CustomerSegmentMember[]
   passwordResets PasswordReset[]
   reviews   Review[]
+  devices   DeviceToken[]
 
   // Email é único DENTRO do grupo (grupos diferentes podem ter o mesmo email).
   @@unique([groupId, email])
@@ -931,6 +935,113 @@ model EmailOutbox {
   createdAt DateTime @default(now())
 
   @@index([groupId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// PUSH (FCM v1) — aparelhos registrados + log de envio
+// ---------------------------------------------------------------------------
+
+/// Um aparelho que pode receber push. O token vem do FCM (no app Expo:
+/// `getDevicePushTokenAsync()`), é por INSTALAÇÃO — não por usuário — e muda
+/// sozinho (reinstalação, limpeza de dados, rotação do próprio FCM). Por isso
+/// o app re-registra a cada abertura e o `token` é a chave natural.
+model DeviceToken {
+  id         String         @id @default(cuid())
+  group      Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  /// Dono do aparelho. Nulo = registrado antes do login (visitante).
+  customer   Customer?      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId String?
+  token      String         @unique
+  platform   DevicePlatform
+  deviceName String?
+  appVersion String?
+  /// Desativado quando o FCM responde UNREGISTERED — o app foi desinstalado.
+  /// Nunca apagamos: o histórico de envios continua fazendo sentido.
+  active         Boolean   @default(true)
+  disabledReason String?
+  lastSeenAt     DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+
+  messages PushMessage[]
+
+  @@index([groupId])
+  @@index([customerId])
+}
+
+enum DevicePlatform {
+  ANDROID
+  IOS
+  WEB
+}
+
+/// Credencial do FCM DO GRUPO. Cada grupo abre o próprio projeto no Firebase
+/// e cola aqui a chave da conta de serviço — é o que torna o push deles
+/// realmente deles: o token que o app emite pertence ao projeto Firebase que
+/// gerou o google-services.json, e só a credencial DESSE projeto consegue
+/// enviar para ele.
+///
+/// Sem registro aqui, o envio cai na credencial do servidor (.env), que é a
+/// que o professor usa na demonstração.
+model GroupPushConfig {
+  id          String   @id @default(cuid())
+  group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId     String   @unique
+  projectId   String
+  clientEmail String
+  /// A chave privada NUNCA volta pela API e não fica em texto puro no banco:
+  /// é cifrada com AES-256-GCM (ver lib/secretBox.ts).
+  privateKeyEnc String
+  /// Resultado do último handshake OAuth com o Google — o aluno vê na hora se
+  /// a chave que colou presta, em vez de descobrir no silêncio do aparelho.
+  lastCheckAt  DateTime?
+  lastCheckOk  Boolean?
+  lastCheckMsg String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/// Log de TODA tentativa de push: o que saiu e o que o FCM respondeu. É o
+/// inspector da aula — o aluno vê o payload real, não uma abstração.
+model PushMessage {
+  id            String       @id @default(cuid())
+  group         Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId       String
+  deviceToken   DeviceToken? @relation(fields: [deviceTokenId], references: [id], onDelete: SetNull)
+  deviceTokenId String?
+  customerId    String?
+  title         String?
+  body          String?
+  /// Payload `data` do FCM: strings em ambos os lados. É daqui que o deep link
+  /// sai (ex.: { "rota": "produto", "produtoId": "..." }).
+  data          Json?
+  kind          PushKind
+  status        PushStatus
+  /// `name` devolvido pelo FCM (projects/x/messages/0:123...).
+  fcmMessageId  String?
+  errorCode     String?
+  errorDetail   String?
+  /// O que originou o envio: manual, price_drop, ...
+  reason        String?
+  createdAt     DateTime     @default(now())
+
+  @@index([groupId, createdAt])
+  @@index([deviceTokenId])
+}
+
+/// NOTIFICATION: o SO desenha a notificação sozinho (chega com o app fechado,
+/// mas o app não roda código até o toque).
+/// DATA: só dados — o app SEMPRE roda o handler, e é ele quem decide se exibe.
+/// A diferença entre as duas é a aula inteira dos "três estados".
+enum PushKind {
+  NOTIFICATION
+  DATA
+}
+
+enum PushStatus {
+  SENT
+  FAILED
+  SKIPPED
 }
 
 model IntegrationSyncLog {

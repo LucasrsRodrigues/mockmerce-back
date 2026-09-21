@@ -73,6 +73,7 @@ export const swaggerPlugin = fp(async (app) => {
         { name: 'Pagamento', description: 'Pagamento simulado' },
         { name: 'Estoque', description: 'Saldo, movimentação, reserva, depósitos' },
         { name: 'Webhooks', description: 'Registro de webhooks, entregas e assinatura HMAC' },
+        { name: 'Push', description: 'Notificações push (FCM v1): aparelhos, envio e inspector' },
         { name: 'Sandbox', description: 'Integrações FAKE: pagamento e frete simulados' },
         { name: 'Relatórios', description: 'Vendas, mais vendidos, clientes, estoque (+CSV)' },
         { name: 'Configurações', description: 'Config do grupo e LGPD' },
