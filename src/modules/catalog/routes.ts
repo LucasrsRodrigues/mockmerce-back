@@ -9,7 +9,7 @@ import {
   serializeVariant, serializeImage, variantInclude, variantLabel,
 } from './serialize.js';
 import { ratingsFor, ratingSummary } from '../reviews/service.js';
-import { notifyPriceDrop } from '../push/service.js';
+import { notifyPriceChange } from '../push/service.js';
 import { money } from '../../lib/serialize.js';
 
 const sec = [{ apiKey: [], studentRm: [] }];
@@ -405,12 +405,12 @@ async function updateVariant(groupId: string, id: string, body: any) {
   });
   const full = await prisma.productVariant.findUniqueOrThrow({ where: { id }, include: variantInclude });
 
-  // Preço caiu -> quem favoritou recebe push. É aguardado (e não disparado em
-  // segundo plano) para que o registro já esteja no inspector quando a
-  // resposta chegar — em aula, ver a causa e o efeito juntos vale o
-  // milissegundo. notifyPriceDrop nunca lança: o preço muda mesmo sem push.
+  // Mudou de preço -> evento sempre, push só na queda. É aguardado (e não
+  // disparado em segundo plano) para que o registro já esteja no inspector
+  // quando a resposta chegar — em aula, ver a causa e o efeito juntos vale o
+  // milissegundo. notifyPriceChange nunca lança: o preço muda mesmo sem push.
   const precoDepois = money(full.price);
-  if (precoDepois < precoAntes) await notifyPriceDrop(groupId, id, precoAntes, precoDepois);
+  if (precoDepois !== precoAntes) await notifyPriceChange(groupId, id, precoAntes, precoDepois);
 
   return serializeVariant(full);
 }

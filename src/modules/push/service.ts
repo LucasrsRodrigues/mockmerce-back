@@ -3,7 +3,7 @@ import { prisma } from '../../prisma.js';
 import { env } from '../../env.js';
 import { tenantScope } from '../../lib/tenantScope.js';
 import { money } from '../../lib/serialize.js';
-import { badRequest, notFound } from '../../lib/errors.js';
+import { badRequest, notFound, type AppError } from '../../lib/errors.js';
 import { emitEvent } from '../../lib/outbox.js';
 import { requirePush, sendPush, type PushResult } from '../../lib/push.js';
 import { resolveCredentials } from './credentials.js';
@@ -262,18 +262,18 @@ export async function listMessages(
 // ------------------------------------------------- gatilho: queda de preço
 
 /**
- * Avisa quem favoritou a variante que o preço caiu.
+ * Reage a uma mudança de preço.
  *
- * Só queda: subiu preço não é notícia que alguém queira receber às 23h. O
- * `data` carrega o produtoId — é dele que o app monta o deep link e abre a
- * tela do produto, em vez da home.
+ * O EVENTO sai sempre (subiu ou desceu); o PUSH só na queda. O `data` carrega
+ * o produtoId — é dele que o app monta o deep link e abre a tela do produto,
+ * em vez da home.
  *
  * Nunca lança: quem chama é o PATCH do preço, e mudar o preço tem que
  * funcionar com o FCM fora do ar.
  */
-export async function notifyPriceDrop(groupId: string, variantId: string, oldPrice: number, newPrice: number) {
+export async function notifyPriceChange(groupId: string, variantId: string, oldPrice: number, newPrice: number) {
   try {
-    if (!(newPrice < oldPrice)) return;
+    if (newPrice === oldPrice) return;
 
     const variant = await prisma.productVariant.findFirst({
       where: tenantScope(groupId, { id: variantId }),
@@ -281,6 +281,11 @@ export async function notifyPriceDrop(groupId: string, variantId: string, oldPri
     });
     if (!variant) return;
 
+    /**
+     * O evento sai em QUALQUER mudança — subiu ou desceu. Ele se chama
+     * `price_changed`, e um webhook que acompanha preço precisa ver aumento
+     * também (é assim que se detecta remarcação). Só o PUSH é seletivo.
+     */
     await emitEvent(prisma, groupId, 'product.price_changed', {
       variantId,
       productId: variant.product.id,
@@ -288,11 +293,13 @@ export async function notifyPriceDrop(groupId: string, variantId: string, oldPri
       newPrice,
     });
 
+    // Preço que sobe não é notícia que alguém queira receber às 23h.
+    if (newPrice > oldPrice) return;
+
     const favorites = await prisma.favorite.findMany({
       where: tenantScope(groupId, { variantId }),
       select: { customerId: true },
     });
-    if (favorites.length === 0) return;
 
     const percent = Math.round(((oldPrice - newPrice) / oldPrice) * 100);
     const payload: DeliverInput = {
@@ -309,14 +316,52 @@ export async function notifyPriceDrop(groupId: string, variantId: string, oldPri
       reason: 'price_drop',
     };
 
+    /**
+     * NINGUÉM FAVORITOU — e isso precisa DEIXAR RASTRO.
+     *
+     * Antes, este caso saía calado: o preço caía, nada era enviado, e o
+     * inspector ficava vazio. Quem testava não tinha como distinguir "o
+     * gatilho não rodou" de "rodou e não tinha para quem mandar" — que é
+     * justamente a primeira pergunta de quem diz "mudei o preço e não
+     * notificou".
+     */
+    if (favorites.length === 0) {
+      await registrarPulo(groupId, payload, 'NO_FAVORITE', 'O preço caiu, mas ninguém favoritou esta variante.');
+      return;
+    }
+
     // Um disparo por cliente favoritador (cada um pode ter vários aparelhos).
     const unique = [...new Set(favorites.map((f) => f.customerId))];
     await mapWithConcurrency(unique, env.PUSH_CONCURRENCY, async (customerId) => {
       await deliver(groupId, { customerId }, payload);
     });
   } catch (err) {
-    console.error('[push] falha ao notificar queda de preço:', err);
+    /**
+     * Também deixa rastro: sem credencial, `deliver` lança 503 PUSH_DISABLED,
+     * e antes isso só aparecia no log do servidor — que o aluno não lê.
+     */
+    const code = (err as AppError)?.code ?? 'ERRO';
+    const msg = (err as Error)?.message ?? String(err);
+    console.error('[push] falha ao notificar mudança de preço:', msg);
+    await registrarPulo(groupId, { reason: 'price_drop' }, code, msg).catch(() => {});
   }
+}
+
+/** Linha de SKIPPED no inspector para um envio que nem chegou a sair. */
+async function registrarPulo(groupId: string, payload: DeliverInput, errorCode: string, errorDetail: string) {
+  await prisma.pushMessage.create({
+    data: {
+      groupId,
+      title: payload.title,
+      body: payload.body,
+      data: (payload.data ?? {}) as any,
+      kind: payload.kind ?? 'NOTIFICATION',
+      status: 'SKIPPED',
+      errorCode,
+      errorDetail: errorDetail.slice(0, 1000),
+      reason: payload.reason ?? 'manual',
+    },
+  });
 }
 
 /** Preço atual de uma variante, para comparar antes/depois de um update. */
